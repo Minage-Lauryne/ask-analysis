@@ -33,8 +33,13 @@ import asyncio
 import json
 import logging
 from typing import List, Dict, Any, Optional, Tuple
+import time
 
 logger = logging.getLogger(__name__)
+
+# Rate limiting for Voyage API (3 RPM on free tier)
+_last_voyage_call = 0.0
+_VOYAGE_MIN_INTERVAL = 20.0  # seconds between calls (3 RPM = 1 call per 20 seconds)
 
 # =========================================================
 # CONFIGURATION
@@ -107,13 +112,23 @@ async def _embed_query_voyage(query: str, model: str = "voyage-3-large") -> Opti
         model: Voyage model (voyage-3-large is recommended for best quality)
     
     Returns:
-        Dense embedding vector (list of floats)
+        Dense embedding vector (list of floats) - 1024 dimensions for voyage-3-large
     """
+    global _last_voyage_call
+    
+    # Target dimension for Pinecone index (voyage-3-large produces 1024 dims)
+    TARGET_DIM = 1024
+    
     if _voyage_client is None:
-        logger.warning("Voyage client unavailable, falling back to embeddings.embed_text")
-        from app.services.embeddings import embed_text
-        vec = await asyncio.to_thread(embed_text, query)
-        return vec.tolist() if hasattr(vec, 'tolist') else list(vec)
+        logger.warning("Voyage client unavailable")
+        return None
+    
+    # Rate limiting: wait if needed (3 RPM on free tier)
+    elapsed = time.time() - _last_voyage_call
+    if elapsed < _VOYAGE_MIN_INTERVAL:
+        wait_time = _VOYAGE_MIN_INTERVAL - elapsed
+        logger.debug(f"Rate limiting: waiting {wait_time:.1f}s before Voyage API call")
+        await asyncio.sleep(wait_time)
     
     try:
         def _embed():
@@ -123,24 +138,27 @@ async def _embed_query_voyage(query: str, model: str = "voyage-3-large") -> Opti
                 input_type="query"  # Use "query" for search queries
             )
         
+        _last_voyage_call = time.time()
         response = await asyncio.to_thread(_embed)
         
         # Extract embedding from response
         embeddings = getattr(response, "embeddings", None)
         if embeddings and isinstance(embeddings, list) and embeddings:
-            logger.debug(f"Voyage dense embedding: {len(embeddings[0])} dimensions")
-            return embeddings[0]
+            vec = embeddings[0]
+            logger.debug(f"Voyage dense embedding: {len(vec)} dimensions")
+            
+            # Verify dimension matches expected
+            if len(vec) != TARGET_DIM:
+                logger.warning(f"Voyage returned {len(vec)} dims, expected {TARGET_DIM}")
+            
+            return vec
         
-        # Fallback
-        from app.services.embeddings import embed_text
-        vec = await asyncio.to_thread(embed_text, query)
-        return vec.tolist() if hasattr(vec, 'tolist') else list(vec)
+        logger.error("Voyage returned empty embeddings")
+        return None
         
     except Exception as e:
         logger.error(f"Voyage embedding failed: {e}")
-        from app.services.embeddings import embed_text
-        vec = await asyncio.to_thread(embed_text, query)
-        return vec.tolist() if hasattr(vec, 'tolist') else list(vec)
+        return None
 
 
 def _encode_sparse_bm25(query: str) -> Optional[Dict[str, Any]]:
@@ -437,16 +455,23 @@ async def combined_search(
     # STEP 1: DENSE EMBEDDING (Voyage-3-large)
     # =========================================================
     # Captures: Intent, Context, Semantics
+    # NOTE: Pinecone index expects 1024 dimensions (voyage-3-large)
     logger.debug("Step 1: Generating dense embedding (Voyage-3-large)...")
     dense_vec = await _embed_query_voyage(query_text)
     
     if dense_vec is None:
-        logger.error("Failed to generate dense embedding")
+        logger.error("Failed to generate dense embedding - Voyage API unavailable or rate limited")
+        logger.error("Please add payment method at https://dashboard.voyageai.com/ to increase rate limits")
         return []
     
     # Ensure it's a list for Pinecone API
     if hasattr(dense_vec, 'tolist'):
         dense_vec = dense_vec.tolist()
+    
+    # Verify dimension matches Pinecone index (1024 for voyage-3-large)
+    if len(dense_vec) != 1024:
+        logger.error(f"Embedding dimension mismatch: got {len(dense_vec)}, expected 1024")
+        return []
     
     logger.debug(f"  → Dense vector: {len(dense_vec)} dimensions")
 
