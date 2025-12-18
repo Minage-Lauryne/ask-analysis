@@ -1503,6 +1503,270 @@ def format_apa_citation_from_metadata(metadata: Dict[str, Any]) -> str:
     return ". ".join([p for p in parts if p]) + "."
 
 
+# =========================================================
+# RELEVANCE CHECKING AND DOMAIN DISCLOSURE
+# =========================================================
+
+# Minimum relevance score threshold (0.0 to 1.0)
+# Documents below this threshold are considered irrelevant
+MIN_RELEVANCE_SCORE = 0.65
+
+# Known domains/sectors in the Pinecone database
+# This should match what's actually stored - update as needed
+# Based on Washington State Cited Studies dataset
+AVAILABLE_DOMAINS = {
+    "juvenile_justice": {
+        "name": "Juvenile Justice & Court-Involved Youth",
+        "description": "Programs for delinquent youth, recidivism prevention, probation services, and reentry support",
+        "keywords": ["juvenile", "delinquent", "youth", "recidivism", "probation", "court-involved", "reentry", "offender", "detention"],
+        "meta_analysis_titles": [
+            "Functional Family Therapy (FFT) for youth post-release",
+            "Parenting with Love and Limits (PLL) for court-involved/post-release youth"
+        ]
+    },
+    "foster_care": {
+        "name": "Foster Care & Treatment Foster Care",
+        "description": "Multidimensional Treatment Foster Care, group home alternatives, foster parent interventions",
+        "keywords": ["foster care", "MTFC", "treatment foster care", "group home", "out-of-home", "placement"],
+        "meta_analysis_titles": [
+            "Multidimensional Treatment Foster Care (MTFC) (vs. group homes) for court-involved youth"
+        ]
+    },
+    "family_therapy": {
+        "name": "Family-Focused Interventions",
+        "description": "Family therapy programs, parenting interventions, and family reunification services",
+        "keywords": ["family therapy", "parenting", "family-focused", "FFT", "functional family", "parent training"],
+        "meta_analysis_titles": []
+    },
+    "adolescent_behavioral": {
+        "name": "Adolescent Behavioral Health",
+        "description": "Conduct disorders, substance use prevention, pregnancy prevention, behavioral interventions",
+        "keywords": ["conduct disorder", "oppositional", "substance use", "pregnancy prevention", "behavioral", "adolescent"],
+        "meta_analysis_titles": []
+    }
+}
+
+
+def get_available_domains_summary() -> str:
+    """
+    Get a formatted summary of available research domains.
+    
+    Returns:
+        Formatted string describing available domains
+    """
+    lines = ["**Available Research Domains in Database:**\n"]
+    for key, domain in AVAILABLE_DOMAINS.items():
+        lines.append(f"• **{domain['name']}**: {domain['description']}")
+    return "\n".join(lines)
+
+
+def check_query_relevance(
+    query_text: str,
+    candidates: List[Dict[str, Any]],
+    score_threshold: float = MIN_RELEVANCE_SCORE
+) -> Dict[str, Any]:
+    """
+    Check if retrieved candidates are semantically relevant to the query.
+    
+    This prevents the system from forcing irrelevant citations when the
+    database doesn't contain relevant data for the query topic.
+    
+    Args:
+        query_text: The user's query or document content
+        candidates: Retrieved candidate documents
+        score_threshold: Minimum relevance score (0.0-1.0)
+    
+    Returns:
+        Dict with:
+            - is_relevant: bool
+            - avg_score: float
+            - max_score: float
+            - relevant_count: int
+            - available_domains: List of domain names with data
+            - recommendation: str (explanation for user)
+    """
+    if not candidates:
+        return {
+            "is_relevant": False,
+            "avg_score": 0.0,
+            "max_score": 0.0,
+            "relevant_count": 0,
+            "available_domains": list(AVAILABLE_DOMAINS.keys()),
+            "recommendation": "No documents were retrieved from the database."
+        }
+    
+    # Extract scores from candidates
+    scores = []
+    for c in candidates:
+        # Try different score fields
+        score = (
+            c.get("rerank_score") or 
+            c.get("score") or 
+            c.get("distance") or 
+            0.0
+        )
+        # Normalize if needed (some scores are 0-1, some might be higher)
+        if isinstance(score, (int, float)):
+            scores.append(float(score))
+    
+    if not scores:
+        scores = [0.0]
+    
+    avg_score = sum(scores) / len(scores)
+    max_score = max(scores)
+    
+    # Count how many candidates meet the threshold
+    relevant_count = sum(1 for s in scores if s >= score_threshold)
+    
+    # Extract domains present in the retrieved documents
+    detected_domains = set()
+    detected_topics = set()
+    for c in candidates:
+        md = c.get("metadata", {}) if isinstance(c.get("metadata"), dict) else c
+        
+        # Check meta_analysis_title for domain hints
+        meta_title = md.get("meta_analysis_title", "") or ""
+        for domain_key, domain_info in AVAILABLE_DOMAINS.items():
+            for keyword in domain_info.get("keywords", []):
+                if keyword.lower() in meta_title.lower():
+                    detected_domains.add(domain_info["name"])
+                    break
+        
+        # Also check topic field
+        topic = md.get("topic", "") or ""
+        if topic:
+            detected_topics.add(topic[:100])
+    
+    # Determine if results are relevant
+    # Criteria: At least 30% of results should meet threshold, OR max score > 0.75
+    is_relevant = (relevant_count >= len(candidates) * 0.3) or (max_score >= 0.75)
+    
+    # Build recommendation message
+    if is_relevant:
+        recommendation = f"Found {relevant_count} relevant documents (avg relevance: {avg_score:.2f})"
+    else:
+        available_list = list(detected_domains) if detected_domains else [d["name"] for d in AVAILABLE_DOMAINS.values()]
+        recommendation = (
+            f"The retrieved documents appear to have low relevance to your query "
+            f"(avg score: {avg_score:.2f}, max: {max_score:.2f}). "
+            f"Currently available research domains include: {', '.join(available_list[:5])}."
+        )
+    
+    return {
+        "is_relevant": is_relevant,
+        "avg_score": avg_score,
+        "max_score": max_score,
+        "relevant_count": relevant_count,
+        "total_candidates": len(candidates),
+        "detected_domains": list(detected_domains),
+        "detected_topics": list(detected_topics)[:5],
+        "available_domains": [d["name"] for d in AVAILABLE_DOMAINS.values()],
+        "recommendation": recommendation
+    }
+
+
+def generate_no_relevant_data_response(
+    query_text: str,
+    relevance_check: Dict[str, Any]
+) -> Dict[str, Any]:
+    """
+    Generate a helpful response when no relevant data is found.
+    
+    Instead of forcing irrelevant citations, this tells the user:
+    1. That no relevant research was found for their topic
+    2. What domains/sectors ARE available in the database
+    3. Suggestions for how to proceed
+    
+    Args:
+        query_text: Original query
+        relevance_check: Output from check_query_relevance()
+    
+    Returns:
+        Dict with response and metadata
+    """
+    detected_domains = relevance_check.get("detected_domains", [])
+    detected_topics = relevance_check.get("detected_topics", [])
+    avg_score = relevance_check.get("avg_score", 0)
+    max_score = relevance_check.get("max_score", 0)
+    
+    # Build the response
+    response = f"""## Research Data Availability Notice
+
+**I was unable to find sufficiently relevant research in our database for your query.**
+
+### Relevance Assessment
+
+| Metric | Value | Threshold |
+|--------|-------|-----------|
+| Average Relevance Score | {avg_score:.2f} | {MIN_RELEVANCE_SCORE} |
+| Maximum Relevance Score | {max_score:.2f} | 0.75 |
+| Status | **Below Threshold** | - |
+
+The retrieved documents do not appear to directly address your topic. Rather than provide misleading citations, I'm informing you of what research IS available.
+
+### Currently Available Research Domains
+
+Our research database (Washington State Institute for Public Policy studies) currently contains peer-reviewed studies in the following areas:
+
+"""
+    
+    # Add detailed domain information
+    for key, domain in AVAILABLE_DOMAINS.items():
+        response += f"**{domain['name']}**\n"
+        response += f"  - {domain['description']}\n\n"
+    
+    if detected_domains:
+        response += f"""### What Was Retrieved (Not Relevant to Your Query)
+
+The search returned documents primarily related to:
+"""
+        for domain in detected_domains[:3]:
+            response += f"- {domain}\n"
+        response += "\nThese topics do not align with your query about legal aid, urban health access, or similar topics.\n"
+    
+    if detected_topics:
+        response += f"""
+### Specific Topics Found in Database
+
+"""
+        for topic in detected_topics[:5]:
+            response += f"- {topic}\n"
+    
+    response += """
+### Recommendations
+
+1. **If your document relates to juvenile justice, family therapy, or foster care**: Rephrase your query to focus on these areas
+2. **If you need research on a different topic** (e.g., legal aid, healthcare access, housing): This database may not have relevant studies - consider:
+   - Requesting that research on your topic be added to the database
+   - Using web search fallback for supplementary sources
+   - Proceeding with analysis without research citations
+
+### How to Proceed
+
+Would you like me to:
+- **Analyze your document using general AI capabilities** (without research citations from this database)
+- **Enable web search** to find relevant research from the internet
+- **Suggest modifications** to align your query with available research
+
+Please let me know how you'd like to proceed.
+
+---
+*Note: This response prioritizes accuracy over forcing irrelevant citations. The research integrity of your analysis is paramount.*
+"""
+    
+    return {
+        "response": response,
+        "citations": [],
+        "has_research": False,
+        "num_sources": 0,
+        "raw_chunks": [],
+        "source": "none",
+        "relevance_check": relevance_check,
+        "data_available": False,
+        "available_domains": [d["name"] for d in AVAILABLE_DOMAINS.values()]
+    }
+
+
 def build_numbered_ref_context(
     candidates: List[Dict[str, Any]],
     max_content_chars: int = 2000
@@ -1604,7 +1868,9 @@ async def generate_from_precomputed_candidates(
     system_prompt: str,
     user_query: str,
     candidates: List[Dict[str, Any]],
-    max_tokens: int = 6000
+    max_tokens: int = 6000,
+    enforce_relevance: bool = True,
+    relevance_threshold: float = MIN_RELEVANCE_SCORE
 ) -> Dict[str, Any]:
     """
     Generate the final response given precomputed candidate matches using REF ID format.
@@ -1614,11 +1880,17 @@ async def generate_from_precomputed_candidates(
     - LLM is instructed to use inline citations like [1], [2]
     - References section lists all sources
     
+    IMPORTANT: This function now includes a relevance check to prevent
+    forcing irrelevant citations when the database doesn't contain
+    relevant data for the query topic.
+    
     Args:
         system_prompt: Base system prompt
         user_query: User's query
         candidates: Precomputed candidate matches from hybrid search
         max_tokens: Maximum tokens for response
+        enforce_relevance: If True, check relevance and refuse low-quality results
+        relevance_threshold: Minimum score for relevance (default from MIN_RELEVANCE_SCORE)
     
     Returns:
         Dict with response, citations, and metadata
@@ -1648,6 +1920,29 @@ async def generate_from_precomputed_candidates(
             'raw_chunks': [],
             'source': 'research'
         }
+    
+    # =========================================================
+    # RELEVANCE CHECK - Prevent forcing irrelevant citations
+    # =========================================================
+    if enforce_relevance:
+        relevance_check = check_query_relevance(
+            query_text=user_query,
+            candidates=unique_candidates,
+            score_threshold=relevance_threshold
+        )
+        
+        logger.info(f"Relevance check: is_relevant={relevance_check['is_relevant']}, "
+                   f"avg_score={relevance_check['avg_score']:.3f}, "
+                   f"max_score={relevance_check['max_score']:.3f}, "
+                   f"relevant_count={relevance_check['relevant_count']}/{relevance_check['total_candidates']}")
+        
+        if not relevance_check["is_relevant"]:
+            logger.warning(f"LOW RELEVANCE DETECTED - Retrieved documents do not match query topic")
+            logger.warning(f"Detected domains in results: {relevance_check.get('detected_domains', [])}")
+            logger.warning(f"Available domains: {relevance_check.get('available_domains', [])}")
+            
+            # Return a helpful response instead of forcing irrelevant citations
+            return generate_no_relevant_data_response(user_query, relevance_check)
 
     # Build numbered context with REF ID format
     numbered_context, citations_data = build_numbered_ref_context(unique_candidates)
