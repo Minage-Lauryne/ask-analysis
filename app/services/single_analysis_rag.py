@@ -1,0 +1,1529 @@
+"""
+Enhanced RAG Integration with Web Search Fallback
+Provides Wikipedia-style citations with automatic web search when RAG returns no results
+Supports full PDF access via S3 storage
+"""
+
+from typing import List, Dict, Any, Optional
+from app.services.research import search_research_chunks_from_text
+from app.services.comparative_analysis import safe_generate
+import re
+import os
+import io
+import logging
+import requests
+from dotenv import load_dotenv
+from tavily import TavilyClient
+from bs4 import BeautifulSoup
+from datetime import datetime
+import pdfplumber
+from PIL import Image
+import pytesseract
+
+try:
+    import pytesseract
+    TESSERACT_AVAILABLE = True
+except ImportError:
+    TESSERACT_AVAILABLE = False
+    logging.warning("pytesseract not available - OCR disabled")
+
+logger = logging.getLogger(__name__)
+
+load_dotenv()
+
+logger.setLevel(logging.DEBUG)
+
+tavily_api_key = os.getenv('TAVILY_API_KEY')
+tavily_client = TavilyClient(api_key=tavily_api_key) if tavily_api_key else None
+
+
+def extract_author_from_webpage(url: str, title: str = "") -> Dict[str, Optional[str]]:
+    """
+    Extract author name and publication year from webpage HTML
+    Returns author in "FirstName L." format (e.g., "Erin N.")
+    
+    Args:
+        url: Webpage URL to fetch and parse
+        title: Page title from search results (fallback)
+    
+    Returns:
+        {
+            'author': 'FirstName L.' or None,
+            'year': 'YYYY' or 'n.d.',
+            'organization': 'Domain-based org name'
+        }
+    """
+    try:        
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        }
+        response = requests.get(url, headers=headers, timeout=10)
+        response.raise_for_status()
+        
+        soup = BeautifulSoup(response.content, 'html.parser')
+        
+        author_name = None
+        pub_year = None
+        
+        meta_author = soup.find('meta', attrs={'name': 'author'})
+        if meta_author and meta_author.get('content'):
+            author_name = meta_author.get('content').strip()
+        
+        if not author_name:
+            scripts = soup.find_all('script', type='application/ld+json')
+            for script in scripts:
+                try:
+                    import json
+                    data = json.loads(script.string)
+                    if isinstance(data, dict):
+                        author_data = data.get('author', {})
+                        if isinstance(author_data, dict):
+                            author_name = author_data.get('name')
+                        elif isinstance(author_data, str):
+                            author_name = author_data
+                        if author_name:
+                            break
+                except:
+                    continue
+        
+        if not author_name:
+            author_patterns = [
+                ('class', 'author'),
+                ('class', 'writer'),
+                ('class', 'byline'),
+                ('rel', 'author'),
+                ('itemprop', 'author'),
+                ('itemprop', 'name')
+            ]
+            
+            for attr_name, attr_value in author_patterns:
+                author_elem = soup.find(attrs={attr_name: lambda x: x and attr_value in str(x).lower()})
+                if author_elem:
+                    author_name = author_elem.get_text().strip()
+                    author_name = re.sub(r'^(By|Author|Written by|Posted by):?\s*', '', author_name, flags=re.IGNORECASE)
+                    if author_name and len(author_name) < 100: 
+                        break
+        
+        if not author_name:
+            text_content = soup.get_text()
+            name_pattern = r'([A-Z][a-z]+ [A-Z][a-z]+)\s+\1'
+            match = re.search(name_pattern, text_content)
+            if match:
+                author_name = match.group(1)
+        
+        if not pub_year:
+            date_metas = [
+                soup.find('meta', attrs={'property': 'article:published_time'}),
+                soup.find('meta', attrs={'name': 'publication_date'}),
+                soup.find('meta', attrs={'name': 'date'})
+            ]
+            for meta in date_metas:
+                if meta and meta.get('content'):
+                    date_str = meta.get('content')
+                    year_match = re.search(r'(20\d{2})', date_str)
+                    if year_match:
+                        pub_year = year_match.group(1)
+                        break
+        
+        if not pub_year:
+            text_content = soup.get_text()
+            date_patterns = [
+                r'Updated on:?\s*[A-Za-z]+\s+\d+,\s+(20\d{2})',
+                r'Published:?\s*[A-Za-z]+\s+\d+,\s+(20\d{2})',
+                r'©\s*(20\d{2})',
+                r'Copyright\s*(20\d{2})'
+            ]
+            for pattern in date_patterns:
+                match = re.search(pattern, text_content)
+                if match:
+                    pub_year = match.group(1)
+                    break
+        
+        formatted_author = None
+        if author_name:
+            author_name = author_name.strip()
+            author_name = re.sub(r'\s+', ' ', author_name)
+            
+            name_parts = author_name.split()
+            if len(name_parts) >= 2:
+                first_name = name_parts[0]
+                last_name_initial = name_parts[-1][0] if name_parts[-1] else ''
+                formatted_author = f"{first_name} {last_name_initial}."
+            elif len(name_parts) == 1:
+                formatted_author = name_parts[0]
+        
+        organization = None
+        if '://' in url:
+            domain = url.split('/')[2]
+            org_parts = domain.replace('www.', '').split('.')
+            organization = org_parts[0].capitalize() if org_parts else None
+        
+        return {
+            'author': formatted_author,
+            'year': pub_year or 'n.d.',
+            'organization': organization
+        }
+        
+    except requests.Timeout:
+        logger.warning(f"Timeout while fetching web author from: {url[:80]}")
+        return {'author': None, 'year': 'n.d.', 'organization': None}
+    except Exception as e:
+        logger.error(f"Failed to extract web author from {url[:80]}: {e}")
+        return {'author': None, 'year': 'n.d.', 'organization': None}
+
+try:
+    import pytesseract
+    TESSERACT_AVAILABLE = True
+except ImportError:
+    TESSERACT_AVAILABLE = False
+    logging.warning("pytesseract not available - OCR disabled")
+
+try:
+    import pytesseract
+    TESSERACT_AVAILABLE = True
+except ImportError:
+    TESSERACT_AVAILABLE = False
+
+logger = logging.getLogger(__name__)
+
+
+def download_pdf_with_full_metadata(pdf_url: str, max_pages: int = 5) -> Dict[str, any]:
+    """
+    Download PDF and extract BOTH text and images for OCR
+    Gets more pages to ensure we capture author info
+    
+    Args:
+        pdf_url: Full URL to PDF
+        max_pages: Number of pages to extract (default 5 for thorough metadata)
+    
+    Returns:
+        {
+            'text': 'extracted text',
+            'images': [PIL Images],
+            'metadata': {} PDF metadata dict,
+            'first_page_text': 'text from page 1 only'
+        }
+    """
+    try:
+        response = requests.get(pdf_url, timeout=15)
+        response.raise_for_status()
+        
+        pdf_bytes = io.BytesIO(response.content)
+        result = {
+            'text': '',
+            'images': [],
+            'metadata': {},
+            'first_page_text': ''
+        }
+        
+        with pdfplumber.open(pdf_bytes) as pdf:
+            # Extract PDF metadata (often has author)
+            if pdf.metadata:
+                result['metadata'] = pdf.metadata
+                logger.info(f"PDF metadata: {pdf.metadata}")
+            
+            # Extract text from first N pages
+            text_parts = []
+            for page_num in range(min(max_pages, len(pdf.pages))):
+                page = pdf.pages[page_num]
+                page_text = page.extract_text() or ''
+                
+                # Store first page separately for focused analysis
+                if page_num == 0:
+                    result['first_page_text'] = page_text
+                
+                text_parts.append(page_text)
+                
+                # Extract images for OCR (in case it's scanned)
+                if TESSERACT_AVAILABLE and page_num == 0:
+                    try:
+                        images = page.images
+                        for img_info in images[:3]:
+                            bbox = (img_info['x0'], img_info['top'], 
+                                   img_info['x1'], img_info['bottom'])
+                            img = page.within_bbox(bbox).to_image()
+                            if img:
+                                result['images'].append(img.original)
+                    except Exception as e:
+                        logger.debug(f"Could not extract images from page {page_num}: {e}")
+            
+            result['text'] = '\n'.join(text_parts)
+        
+        return result
+        
+    except Exception as e:
+        logger.error(f"Failed to download/extract PDF: {e}")
+        return {'text': '', 'images': [], 'metadata': {}, 'first_page_text': ''}
+
+
+async def extract_author_with_ai(first_page_text: str) -> Optional[str]:
+    """
+    Use Claude API to intelligently extract author names from PDF text
+    This handles ANY format including edge cases regex can't catch
+    
+    Args:
+        first_page_text: First page of PDF as text
+        
+    Returns:
+        First author's last name in "LastName et al." format, or None
+    """
+    if not first_page_text or len(first_page_text) < 50:
+        return None
+    
+    # Check if ANTHROPIC_API_KEY is available
+    api_key = os.getenv('ANTHROPIC_API_KEY')
+    if not api_key:
+        logger.warning("ANTHROPIC_API_KEY not set - skipping AI extraction")
+        return None
+    
+    try:
+        # Take first 2000 chars for API efficiency
+        text_sample = first_page_text[:2000]
+        
+        # Create prompt for Claude
+        prompt = f"""Extract the FIRST author's last name from this academic paper's first page.
+
+Rules:
+- Return ONLY the last name of the FIRST author (not all authors)
+- Ignore title, abstract, keywords, affiliations, emails
+- Ignore journal names, copyright notices, headers
+- If multiple authors are listed, take ONLY the first one
+- Return format: just the last name (e.g., "Smith" not "John Smith")
+- If you cannot find a clear author name, return: NONE
+
+First page text:
+{text_sample}
+
+FIRST AUTHOR'S LAST NAME:"""
+        
+        # Call Claude API
+        response = requests.post(
+            "https://api.anthropic.com/v1/messages",
+            headers={
+                "Content-Type": "application/json",
+                "x-api-key": api_key,
+                "anthropic-version": "2023-06-01"
+            },
+            json={
+                "model": "claude-3-5-sonnet-20241022",
+                "max_tokens": 100,
+                "messages": [
+                    {"role": "user", "content": prompt}
+                ]
+            },
+            timeout=10
+        )
+        
+        if response.status_code == 200:
+            data = response.json()
+            author_name = data['content'][0]['text'].strip()
+            
+            # Validate response
+            if author_name and author_name.upper() != 'NONE' and len(author_name) < 50:
+                # Clean up any extra text
+                author_name = re.sub(r'[.,;:\*\'"()]', '', author_name).strip()
+                
+                # Make sure it's a valid name (letters only, possibly with dash)
+                if re.match(r'^[A-Za-z\-]+$', author_name):
+                    # Capitalize properly
+                    author_name = author_name.capitalize() if author_name.islower() else author_name
+                    logger.info(f"✓ AI extracted author: {author_name}")
+                    return f"{author_name} et al."
+        
+        logger.warning("AI extraction failed or returned invalid result")
+        return None
+        
+    except Exception as e:
+        logger.error(f"AI author extraction failed: {e}")
+        return None
+
+
+def extract_author_with_ocr_fallback(pdf_data: Dict, filename: str) -> Dict[str, str]:
+    """
+    COMPREHENSIVE author extraction with multiple strategies:
+    1. PDF metadata (most reliable)
+    2. AI-powered extraction using Claude API (NEW - handles ANY format)
+    3. Regex-based extraction (fallback for when AI unavailable)
+    4. OCR on images (for scanned PDFs)
+    5. Filename parsing (last resort)
+    
+    Returns author in "LastName et al." format for APA
+    
+    Args:
+        pdf_data: Output from download_pdf_with_full_metadata()
+        filename: Fallback filename
+        
+    Returns:
+        {'author': 'LastName et al.', 'year': 'YYYY', 'title': 'Paper Title'}
+    """
+    result = {'author': None, 'year': None, 'title': None}
+    
+    # STRATEGY 1: PDF Metadata (most reliable)
+    metadata = pdf_data.get('metadata', {})
+    if metadata:
+        author_fields = ['Author', 'author', 'Creator', 'creator', 'Authors', 'authors']
+        for field in author_fields:
+            if field in metadata and metadata[field]:
+                author_raw = str(metadata[field]).strip()
+                author_raw = re.sub(r'^(by|author:?)\s*', '', author_raw, flags=re.IGNORECASE)
+                
+                if author_raw and len(author_raw) < 200:
+                    result['author'] = format_author_for_apa(author_raw)
+                    logger.info(f"✓ Author from PDF metadata: {result['author']}")
+                    break
+        
+        # Check for year in metadata
+        date_fields = ['CreationDate', 'creation_date', 'ModDate', 'mod_date', 'Date', 'date']
+        for field in date_fields:
+            if field in metadata and metadata[field]:
+                year_match = re.search(r'(19\d{2}|20\d{2})', str(metadata[field]))
+                if year_match:
+                    result['year'] = year_match.group(1)
+                    break
+    
+    # STRATEGY 2: AI-powered extraction (NEW - most reliable for text)
+    if not result['author']:
+        first_page = pdf_data.get('first_page_text', '')
+        if first_page:
+            # Try AI extraction first
+            try:
+                import asyncio
+                # Check if we're already in an async context
+                try:
+                    loop = asyncio.get_running_loop()
+                    # We're in async context, create task
+                    ai_author = loop.run_until_complete(extract_author_with_ai(first_page))
+                except RuntimeError:
+                    # Not in async context, create new loop
+                    ai_author = asyncio.run(extract_author_with_ai(first_page))
+                
+                if ai_author:
+                    result['author'] = ai_author
+                    logger.info(f"✓ Author from AI: {result['author']}")
+            except Exception as e:
+                logger.warning(f"AI extraction error: {e}")
+    
+    # STRATEGY 3: Regex-based extraction (fallback)
+    if not result['author']:
+        first_page = pdf_data.get('first_page_text', '')
+        if first_page:
+            author = extract_author_with_regex(first_page)
+            if author:
+                result['author'] = author
+                logger.info(f"✓ Author from regex: {result['author']}")
+    
+    # Extract year from text if not found
+    text = pdf_data.get('text', '')
+    if text and not result['year']:
+        header = text[:2000]
+        year_matches = re.findall(r'\b(19\d{2}|20\d{2})\b', header)
+        if year_matches:
+            years = [int(y) for y in year_matches if 1990 <= int(y) <= 2025]
+            if years:
+                result['year'] = str(max(years))
+    
+    # STRATEGY 4: OCR on images (for scanned PDFs)
+    if not result['author'] and TESSERACT_AVAILABLE and pdf_data.get('images'):
+        logger.info("Attempting OCR on PDF images...")
+        ocr_author = extract_author_from_images(pdf_data['images'])
+        if ocr_author:
+            result['author'] = ocr_author
+            logger.info(f"✓ Author from OCR: {result['author']}")
+    
+    # STRATEGY 5: Filename parsing (last resort)
+    if not result['author'] and filename:
+        filename_data = extract_author_year_from_filename(filename)
+        if filename_data.get('author'):
+            result['author'] = filename_data['author']
+            logger.info(f"⚠ Author from filename: {result['author']}")
+        if filename_data.get('year') and not result['year']:
+            result['year'] = filename_data['year']
+    
+    # Extract title
+    if filename:
+        title = filename.replace('.pdf', '').replace('.json', '')
+        title = re.sub(r'^paper_\d+_?', '', title)
+        title = title.replace('_', ' ').strip()
+        result['title'] = title[:200]
+    
+    # Final defaults
+    if not result['author']:
+        result['author'] = 'Unknown Author'
+        logger.warning(f"❌ Could not extract author from PDF: {filename}")
+    if not result['year']:
+        result['year'] = 'n.d.'
+    
+    return result
+
+
+def extract_author_with_regex(first_page_text: str) -> Optional[str]:
+    """
+    Regex-based author extraction (fallback when AI unavailable)
+    Handles common patterns but won't catch all edge cases
+    """
+    if not first_page_text or len(first_page_text) < 50:
+        return None
+    
+    text = first_page_text[:2000]
+    
+    # Common false positives to avoid
+    false_positives = {
+        'abstract', 'introduction', 'keywords', 'university', 'college',
+        'journal', 'copyright', 'published', 'supervision', 'implementation',
+        'system', 'version', 'equation', 'windows', 'unicode'
+    }
+    
+    def is_false_positive(name: str) -> bool:
+        name_lower = name.lower()
+        return any(fp in name_lower for fp in false_positives)
+    
+    def extract_last_name(name: str) -> Optional[str]:
+        """Extract last name from full name"""
+        # Clean credentials
+        name = re.sub(r',?\s*(?:Ph\.?D\.?|M\.D\.?|M\.P\.P\.?|M\.A\.?|M\.S\.?|EdD|MD|JD|Psy\.?D\.?).*$', 
+                     '', name, flags=re.IGNORECASE)
+        parts = name.split()
+        if len(parts) >= 2:
+            last_name = parts[-1]
+            last_name = re.sub(r'[,;:\*\.]', '', last_name)
+            if last_name.isupper() and len(last_name) > 2:
+                last_name = last_name.capitalize()
+            return f"{last_name} et al."
+        return None
+    
+    # Pattern 1: Multiple authors with middle initials
+    pattern = r'\b([A-Z][a-z]+(?:\s+[A-Z]\.?)+\s+[A-Z][a-z]+)'
+    matches = re.findall(pattern, text[:500])  # First 500 chars most likely
+    for match in matches:
+        if not is_false_positive(match):
+            result = extract_last_name(match)
+            if result:
+                return result
+    
+    # Pattern 2: Simple "FirstName LastName"
+    pattern = r'\b([A-Z][a-z]+\s+[A-Z][a-z]+)\b'
+    matches = re.findall(pattern, text[:500])
+    for match in matches:
+        if not is_false_positive(match) and len(match.split()) == 2:
+            result = extract_last_name(match)
+            if result:
+                return result
+    
+    return None
+
+
+def extract_author_from_images(images: list) -> Optional[str]:
+    """Use OCR to extract author from PDF images"""
+    if not TESSERACT_AVAILABLE:
+        return None
+    
+    try:
+        for img in images[:2]:
+            img_gray = img.convert('L')
+            ocr_text = pytesseract.image_to_string(img_gray)
+            
+            if ocr_text:
+                # Try AI extraction on OCR text
+                try:
+                    import asyncio
+                    ai_author = asyncio.run(extract_author_with_ai(ocr_text))
+                    if ai_author:
+                        return ai_author
+                except:
+                    pass
+                
+                # Fallback to regex
+                author = extract_author_with_regex(ocr_text)
+                if author:
+                    return author
+        
+        return None
+        
+    except Exception as e:
+        logger.error(f"OCR extraction failed: {e}")
+        return None
+
+
+def format_author_for_apa(author_raw: str) -> str:
+    """Format author name for APA style: "LastName et al." """
+    if not author_raw:
+        return None
+    
+    author_raw = author_raw.strip()
+    author_raw = re.sub(r'\s+', ' ', author_raw)
+    author_raw = re.sub(r',\s*(?:Ph\.?D\.?|M\.D\.?|M\.P\.P\.?|M\.A\.?|M\.S\.?|EdD|MD|JD|Psy\.?D\.?).*$', 
+                       '', author_raw, flags=re.IGNORECASE)
+    
+    if ',' in author_raw:
+        last_name = author_raw.split(',')[0].strip()
+        if last_name.isupper() and len(last_name) > 2:
+            last_name = last_name.capitalize()
+        return f"{last_name} et al."
+    
+    parts = author_raw.split()
+    if len(parts) >= 2:
+        last_name = parts[-1]
+        last_name = re.sub(r'[,;:\*\.]', '', last_name)
+        if last_name.isupper() and len(last_name) > 2:
+            last_name = last_name.capitalize()
+        return f"{last_name} et al."
+    
+    name = author_raw.capitalize() if author_raw.isupper() else author_raw
+    return f"{name} et al."
+
+
+def extract_author_year_from_filename(filename: str) -> Dict[str, str]:
+    """Extract author and year from filename (fallback)"""
+    result = {'author': None, 'year': None}
+    
+    if not filename:
+        return result
+    
+    name = filename.replace('.pdf', '').replace('.json', '')
+    
+    match = re.search(r'([A-Z][a-z]+)(?:\s+et\s+al\.?)?\s*\((\d{4})\)', name)
+    if match:
+        result['author'] = f"{match.group(1)} et al."
+        result['year'] = match.group(2)
+        return result
+    
+    match = re.search(r'^(\d{4})[_\-\s]+([A-Z][a-z]+)', name)
+    if match:
+        result['year'] = match.group(1)
+        result['author'] = f"{match.group(2)} et al."
+        return result
+    
+    match = re.search(r'([A-Z][a-z]+)[_\-\s]+(\d{4})', name)
+    if match:
+        result['author'] = f"{match.group(1)} et al."
+        result['year'] = match.group(2)
+        return result
+    
+    year_match = re.search(r'\b(19\d{2}|20\d{2})\b', name)
+    if year_match:
+        result['year'] = year_match.group(1)
+    
+    return result
+
+def extract_metadata_from_content(content: str, filename: str) -> Dict[str, str]:
+    """
+    PRODUCTION-READY author extraction - ACTUALLY reads PDF content
+    Based on proven working extractor
+    
+    Handles:
+    - ALL CAPS with asterisks: "JOANNA KAMYKOWSKA*, EWA HAMAN**"
+    - Mixed case: "Stephen Basil Scott, Kathy Sylva"  
+    - Single names: "Josephine Nartey"
+    """
+    result = {'author': None, 'year': None, 'title': None}
+    
+    if not content:
+        return result
+    
+    header = content[:8000]
+    
+    lines = [line.strip() for line in header.split('\n') if line.strip()]
+    
+    if len(lines) < 5:
+        lines = re.split(r'(?<=[.!?])\s+(?=[A-Z])|  +', header)
+        lines = [line.strip() for line in lines if line.strip() and len(line) > 5]
+        
+    year_matches = re.findall(r'\b(19\d{2}|20\d{2})\b', header)
+    if year_matches:
+        years = [int(y) for y in year_matches if 1990 <= int(y) <= 2025]
+        if years:
+            result['year'] = str(max(years))
+    
+    false_positives = {
+        'Abstract', 'Introduction', 'Method', 'Results', 'Discussion', 'Conclusion',
+        'References', 'Appendix', 'Table', 'Figure', 'Keywords', 'Acknowledgments',
+        'University', 'College', 'Institute', 'Department', 'School', 'Center', 'Centre',
+        'Developmental', 'Brief', 'Career', 'Papers', 'From', 'Research', 'Study',
+        'Analysis', 'Report', 'Review', 'Journal', 'Volume', 'Issue', 'Page', 'Copyright',
+        'Metric', 'Equation', 'Earnings', 'Jobs', 'Eviction', 'Prevention', 'Decreased',
+        'Juvenile', 'Delinquency', 'Parents', 'Likely', 'Work', 'Child', 'Care',
+        'Intensive', 'Fostering', 'Independent', 'Evaluation', 'English', 'Setting',
+        'Pilot', 'Trial', 'Supporting', 'Teens', 'Academic', 'Needs', 'Daily', 'Stand',
+        'Parent', 'Adolescent', 'Collaborative', 'Intervention', 'Adhd', 'Sustainability',
+        'Effects', 'Multisystemic', 'Therapy', 'Netherlands', 'Randomized', 'Controlled',
+        'Adjunctive', 'Family', 'Treatment', 'Usual', 'Following', 'Inpatient', 'Anorexia',
+        'Nervosa', 'Adolescents', 'Preventing', 'Falls', 'Physically', 'Active', 'Community',
+        'Dwelling', 'Older', 'People', 'Comparison', 'Two', 'Techniques', 'Instructions'
+    }
+    
+    def is_valid_author_name(name: str) -> bool:
+        """Check if a name is likely a real author name, not a false positive"""
+        parts = name.split()
+        for part in parts:
+            if part.capitalize() in false_positives or part.lower() in ['the', 'a', 'an', 'and', 'or', 'of', 'for', 'to', 'in', 'on']:
+                return False
+        if len(parts) < 2:
+            return False
+        if any(char in name for char in [',', ';', ':', '(', ')', '[', ']']):
+            return False
+        return True
+    
+    for i, line in enumerate(lines[:100]):
+        if not line or len(line) > 200:
+            continue
+        
+        caps_asterisk = re.findall(r'\b([A-Z][A-Z\-\s]{3,40}?[A-Z])\*+', line)
+        if caps_asterisk:
+            name = caps_asterisk[0].strip()
+            name = re.sub(r'\s+', ' ', name)
+            if len(name) > 3 and is_valid_author_name(name):
+                parts = name.split()
+                if parts:
+                    last = parts[-1].capitalize()
+                    result['author'] = f"{last} et al."
+                    break
+        
+        mixed = re.findall(r'\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,3})\b', line)
+        if mixed:
+            name = mixed[0].strip()
+            if is_valid_author_name(name):
+                parts = name.split()
+                if len(parts) >= 2:
+                    last = parts[-1]
+                    result['author'] = f"{last} et al."
+                    break
+        
+        if re.search(r'\bauthor[s]?\s*[:]\s*', line, re.IGNORECASE):
+            section = '\n'.join(lines[i:i+5])
+            names = re.findall(r'\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,2})\b', section)
+            if names:
+                for name in names:
+                    if is_valid_author_name(name):
+                        parts = name.split()
+                        if len(parts) >= 2:
+                            last = parts[-1]
+                            result['author'] = f"{last} et al."
+                            break
+                if result['author']:
+                    break
+        
+        if result['author']:
+            break
+    
+    if filename:
+        title = filename.replace('.pdf', '').replace('.json', '')
+        title = re.sub(r'^paper_\d+_?', '', title)
+        title = title.replace('_', ' ').strip()
+        result['title'] = title[:200] if len(title) > 200 else title
+    
+    if not result['author']:
+        logger.warning(f"Could not extract author from PDF content (filename: {filename})")
+    
+    return result
+
+
+def normalize_filename(filename: str) -> str:
+    """
+    Normalize filename for strict deduplication
+    Removes (1), (2), etc. suffixes, extensions, and normalizes case
+    
+    Example: "Report (1).pdf" → "report"
+    """
+    name = filename.replace('.pdf', '').replace('.json', '')
+    name = re.sub(r'\s*\(\d+\)\s*$', '', name)
+    name = re.sub(r'^paper_\d+_?', '', name)
+    name = name.strip().lower()
+    return name
+
+
+async def search_citation_metadata(filename: str, paper_id: str) -> Dict[str, str]:
+    """
+    Search for paper metadata (author, year) using Tavily web search.
+    
+    Args:
+        filename: The paper filename
+        paper_id: The paper ID
+        
+    Returns:
+        Dict with 'author' and 'year' keys
+    """
+    result = {'author': 'Unknown Author', 'year': 'n.d.'}
+    
+    if not tavily_client:
+        return result
+    
+    try:
+        clean_name = filename.replace('.pdf', '').replace('.json', '').replace('_', ' ')
+        
+        if len(clean_name) > 150:
+            clean_name = clean_name[:150].rsplit(' ', 1)[0]  
+        
+        search_query = clean_name[:400]  
+                
+        response = tavily_client.search(
+            query=search_query,
+            max_results=2,
+            search_depth="basic"
+        )
+        
+        if response and 'results' in response and response['results']:
+            for item in response['results']:
+                content = item.get('content', '') + ' ' + item.get('title', '')
+                
+                year_match = re.search(r'\b(19\d{2}|20\d{2})\b', content)
+                if year_match and result['year'] == 'n.d.':
+                    result['year'] = year_match.group(1)
+                
+                if result['author'] == 'Unknown Author':
+                    author_match = re.search(r'([A-Z][a-z]+),\s*([A-Z]\.(?:\s*[A-Z]\.)?)', content)
+                    if author_match:
+                        result['author'] = f"{author_match.group(1)} {author_match.group(2)}"
+                        continue
+                    
+                    author_match = re.search(r'([A-Z][a-z]+\s+[A-Z][a-z]+)\s+et\s+al', content)
+                    if author_match:
+                        result['author'] = f"{author_match.group(1)} et al."
+                        continue
+                    
+                    author_match = re.search(r'([A-Z][a-z]+)\s+et\s+al', content)
+                    if author_match:
+                        result['author'] = f"{author_match.group(1)} et al."            
+        else:
+            logger.info(f"No results found for citation metadata search")
+        
+    except Exception as e:
+        logger.error(f"Citation metadata search failed: {e}")
+    
+    return result
+
+
+def get_pdf_url_from_paper_id(paper_id: str) -> Optional[str]:
+    """
+    Generate PDF URL from paper_id using Supabase Storage
+    
+    First checks if the paper exists in research_corpus (uploaded files),
+    then generates the appropriate URL.
+    
+    Args:
+        paper_id: The paper identifier from research_chunks
+        
+    Returns:
+        Full URL to PDF or None if not available
+    """
+    if not paper_id or paper_id == 'N/A':
+        return None
+    
+    if paper_id.endswith('.json'):
+        return None
+    
+    try:
+        from app.services.supabase_client import get_storage_filename_from_paper_id
+        
+        storage_filename = get_storage_filename_from_paper_id(paper_id)
+        
+        if not storage_filename:
+            return None
+            
+    except Exception as e:
+        logger.error(f"[PDF URL] Could not verify paper_id in storage: {e}")
+        storage_filename = f"{paper_id}.pdf"
+    
+    supabase_url = os.getenv('SUPABASE_URL')
+    supabase_key = os.getenv('SUPABASE_KEY') or os.getenv('SUPABASE_SERVICE_KEY')
+    bucket_name = os.getenv('SUPABASE_STORAGE_BUCKET', 'research-pdfs')
+    
+    if not supabase_url:
+        logger.error("[PDF URL] SUPABASE_URL not configured")
+        return None
+    
+    supabase_url = supabase_url.rstrip('/')
+    
+    use_signed_urls = os.getenv('USE_SIGNED_PDF_URLS', 'false').lower() == 'true'
+    
+    if not use_signed_urls:
+        return f"{supabase_url}/storage/v1/object/public/{bucket_name}/{storage_filename}"
+    
+    if not supabase_key:
+        logger.error("[PDF URL] SUPABASE_KEY required for signed URLs")
+        return f"{supabase_url}/storage/v1/object/public/{bucket_name}/{paper_id}.pdf"
+    
+    try:
+        from supabase import create_client
+        
+        supabase = create_client(supabase_url, supabase_key)
+        
+        result = supabase.storage.from_(bucket_name).create_signed_url(
+            f"{paper_id}.pdf",
+            expires_in=3600
+        )
+        
+        if result and 'signedURL' in result:
+            return result['signedURL']
+        elif result and 'signed_url' in result:
+            return result['signed_url']
+        else:
+            return None
+            
+    except ImportError:
+        logger.error("[PDF URL] Supabase client not installed. Run: pip install supabase")
+        return f"{supabase_url}/storage/v1/object/public/{bucket_name}/{paper_id}.pdf"
+    except Exception as e:
+        logger.error(f"[PDF URL] Failed to generate signed URL for {paper_id}: {e}")
+        return f"{supabase_url}/storage/v1/object/public/{bucket_name}/{paper_id}.pdf"
+
+
+class CitationManager:
+    """Manages citations in APA format with author/year extraction"""
+    
+    def __init__(self):
+        self.citations: List[Dict[str, Any]] = []
+        self.citation_map: Dict[str, int] = {}  
+        self.next_id = 1
+        self.metadata_cache: Dict[str, Dict[str, str]] = {}
+    
+    async def add_citation(self, chunk: Dict[str, Any], source_type: str = "research") -> int:
+        """
+        Add a citation and return its ID (deduplicated)
+        Supports both research corpus chunks and web search results
+        
+        Args:
+            chunk: Citation data (from RAG or web search)
+            source_type: "research" or "web"
+        """
+        if source_type == "research":
+            paper_id = chunk.get('paper_id', f"chunk_{self.next_id}")
+            filename = chunk.get('filename', 'N/A')
+            
+            normalized_filename = normalize_filename(filename)
+            unique_key = f"research_{paper_id}_{normalized_filename}"
+            
+        else:  
+            url = chunk.get('url', '')
+            url = url.rstrip('/')
+            unique_key = f"web_{url}"
+        
+        if unique_key in self.citation_map:
+            logger.info(f"Duplicate citation detected, skipping: {unique_key}")
+            return self.citation_map[unique_key]
+        
+        citation_id = self.next_id
+        self.next_id += 1
+        
+        self.citation_map[unique_key] = citation_id
+        
+        if source_type == "research":
+            paper_id = chunk.get('paper_id', 'N/A')
+            filename = chunk.get('filename', 'N/A')
+            content = chunk.get('content', '')
+            
+            pdf_url = chunk.get('pdf_url')
+            if not pdf_url and paper_id and paper_id != 'N/A':
+                pdf_url = get_pdf_url_from_paper_id(paper_id)
+            
+            if paper_id not in self.metadata_cache:
+                pdf_url = chunk.get('pdf_url')
+                if not pdf_url and paper_id and paper_id != 'N/A':
+                    pdf_url = get_pdf_url_from_paper_id(paper_id)
+                
+                # NEW: Use comprehensive extraction
+                if pdf_url:
+                    logger.info(f"Extracting metadata from PDF: {pdf_url}")
+                    pdf_data = download_pdf_with_full_metadata(pdf_url, max_pages=5)
+                    metadata = extract_author_with_ocr_fallback(pdf_data, filename)
+                else:
+                    # Fallback to filename only
+                    logger.warning(f"No PDF URL available for {paper_id}, using filename only")
+                    metadata = extract_author_year_from_filename(filename)
+                    if not metadata['author']:
+                        metadata['author'] = 'Unknown Author'
+                    if not metadata['year']:
+                        metadata['year'] = 'n.d.'
+                
+                self.metadata_cache[paper_id] = metadata
+            else:
+                metadata = self.metadata_cache[paper_id]
+            
+            if metadata.get('author') and metadata.get('author') != 'Unknown Author' and metadata.get('year'):
+                author_year_key = f"research_{metadata['author']}_{metadata['year']}"
+                if author_year_key in self.citation_map:
+                    existing_id = self.citation_map[author_year_key]
+                    logger.info(f"Duplicate citation (author+year): {metadata['author']}, {metadata['year']}")
+                    return existing_id
+                self.citation_map[author_year_key] = citation_id
+            
+            pdf_url = chunk.get('pdf_url')
+            if not pdf_url and paper_id and paper_id != 'N/A':
+                pdf_url = get_pdf_url_from_paper_id(paper_id)
+                logger.info(f"Generated PDF URL for {paper_id}: {pdf_url}")
+            
+            self.citations.append({
+                'id': citation_id,
+                'source_type': 'research',
+                'chunk_id': chunk.get('chunk_id', 'N/A'),
+                'paper_id': paper_id,
+                'filename': filename,
+                'author': metadata['author'],
+                'year': metadata['year'],
+                'section': chunk.get('section', 'N/A'),
+                'domain': chunk.get('domain', 'N/A'),
+                'content': chunk.get('content', '')[:300],
+                'distance': float(chunk.get('distance', 0.0)),
+                'pdf_url': pdf_url
+            })
+        else:  
+            self.citations.append({
+                'id': citation_id,
+                'source_type': 'web',
+                'chunk_id': unique_key,
+                'paper_id': 'web',
+                'filename': chunk.get('title', 'Web Source'),
+                'author': chunk.get('author', 'Unknown'),
+                'year': chunk.get('year', 'n.d.'),
+                'section': 'Web',
+                'domain': chunk.get('domain', 'web'),
+                'organization': chunk.get('organization', 'Unknown'),
+                'content': chunk.get('snippet', '')[:300],
+                'distance': 0.0,
+                'url': chunk.get('url', '')
+            })
+        
+        return citation_id
+    
+    def format_reference_section(self) -> str:
+        """Generate APA 7 style reference section with numbered list"""
+        if not self.citations:
+            return ""
+        
+        lines = ["\n\n## References\n"]
+        
+        for citation in sorted(self.citations, key=lambda x: x['id']):
+            if citation['source_type'] == 'research':
+                author = citation.get('author', '')
+                year = citation.get('year', 'n.d.')
+                filename = citation['filename']
+                pdf_url = citation.get('pdf_url', '')
+                
+                title = filename.replace('.pdf', '').replace('.json', '')
+                title = re.sub(r'^paper_\d+_?', '', title)
+                title = title.replace('_', ' ').strip()
+                
+                title = re.sub(r'^[A-Z][a-z]+\s+et\s+al\.?\s+\(\d{4}\)\s*', '', title)
+                title = re.sub(r'^\d{4}\.?\s*', '', title)
+                
+                if len(title) > 200:
+                    title = title[:197].rsplit(' ', 1)[0] + "..."
+                
+                if author and author != 'Unknown Author':
+                    if 'et al' in author.lower():
+                        author_part = f"{author}"
+                    else:
+                        author_part = f"{author}"
+                    
+                    if pdf_url:
+                        ref_line = f"{citation['id']}. {author_part} ({year}). {title}. {pdf_url}"
+                    else:
+                        ref_line = f"{citation['id']}. {author_part} ({year}). {title}."
+                else:
+                    if pdf_url:
+                        ref_line = f"{citation['id']}. {title}. ({year}). {pdf_url}"
+                    else:
+                        ref_line = f"{citation['id']}. {title}. ({year})."
+                
+                lines.append(ref_line)
+            else:  
+                source_title = citation.get('filename', 'Web Source')
+                url = citation.get('url', 'N/A')
+                author = citation.get('author', '')
+                year = citation.get('year', 'n.d.')
+                
+                clean_title = source_title.replace('|', '-').strip()
+                clean_title = re.sub(r'\b20\d{2}\b', '', clean_title).strip()
+                clean_title = re.sub(r'\s+', ' ', clean_title)
+                clean_title = re.sub(r'\[PDF\]\s*', '', clean_title, flags=re.IGNORECASE)
+                clean_title = re.sub(r'\[XML\]\s*', '', clean_title, flags=re.IGNORECASE)
+                clean_title = clean_title.strip()
+                
+                if author and author != 'Unknown':
+                    ref_line = f"{citation['id']}. {author}. ({year}). {clean_title}. {url}"
+                else:
+                    ref_line = f"{citation['id']}. {clean_title}. ({year}). {url}"
+                
+                lines.append(ref_line)
+        
+        return "\n".join(lines)
+    
+    def get_citations_metadata(self) -> List[Dict[str, Any]]:
+        """Return citation metadata for storage/display"""
+        return self.citations
+
+
+async def search_web_for_context(
+    query: str,
+    top_k: int = 5
+) -> List[Dict[str, Any]]:
+    """
+    Web search fallback using Tavily Python client when RAG returns no results
+    Returns authoritative sources with verifiable URLs for citations
+    
+    Args:
+        query: Search query
+        top_k: Number of results to return
+    
+    Returns:
+        List of web results with title, snippet, url, domain
+    """
+    logger.info(f"Initiating Tavily web search for query: '{query[:100]}...'")
+    
+    try:
+        from tavily import TavilyClient
+        
+        tavily_api_key = os.getenv('TAVILY_API_KEY')
+        
+        if not tavily_api_key:
+            logger.error("TAVILY_API_KEY not found in environment - web search disabled")
+            return []
+        
+        client = TavilyClient(api_key=tavily_api_key)
+        
+        truncated_query = query[:400] if len(query) > 400 else query
+        if len(query) > 400:
+            logger.debug(f"Query truncated from {len(query)} to 400 characters")
+                
+        response = client.search(
+            query=truncated_query,
+            search_depth="advanced",  
+            max_results=min(top_k, 10)  
+        )
+        
+        results = response.get('results', [])
+        
+        logger.info(f"Tavily returned {len(results)} results")
+        
+        web_results = []
+        for result in results:
+            url = result.get('url', '')
+            title = result.get('title', 'Untitled')
+            
+            author_data = extract_author_from_webpage(url, title)
+            
+            author_name = author_data.get('author')
+            pub_year = author_data.get('year', 'n.d.')
+            
+            if not author_name:
+                if '://' in url:
+                    domain = url.split('/')[2]
+                    org_parts = domain.replace('www.', '').replace('www3.', '').split('.')
+                    
+                    if 'gov' in org_parts:
+                        if 'erie' in domain:
+                            org_name = 'Erie County'
+                        elif 'santamonica' in domain:
+                            org_name = 'City of Santa Monica'
+                        else:
+                            org_name = org_parts[0].replace('-', ' ').title()
+                    elif '.org' in domain or '.edu' in domain:
+                        org_name = org_parts[0].replace('-', ' ').title()
+                    else:
+                        org_name = org_parts[0].capitalize()
+                    
+                    if url.endswith('.pdf') and title:
+                        if ' - ' in title:
+                            potential_org = title.split(' - ')[-1].strip()
+                            if len(potential_org) < 80 and any(word in potential_org.lower() for word in ['county', 'city', 'department', 'district', 'commission']):
+                                org_name = potential_org
+                        org_match = re.search(r'((?:County|City|Town|Department|District|Commission|Office)\s+of\s+[A-Z][a-zA-Z\s]+)', title, re.IGNORECASE)
+                        if org_match:
+                            org_name = org_match.group(1).strip()
+                    
+                    org_name = re.sub(r'\s+', ' ', org_name).strip()
+                    if not org_name or org_name.lower() in ['www', 'www3', 'cdn', 'static']:
+                        org_name = 'Unknown Source'
+                else:
+                    org_name = 'Unknown Source'
+                
+                author_name = org_name
+            else:
+                logger.debug(f"Extracted web author: {author_name}, year: {pub_year}")
+            
+            domain = url.split('/')[2] if '://' in url else 'unknown'
+            
+            web_results.append({
+                'title': title,
+                'snippet': result.get('content', '')[:500],  
+                'url': url,
+                'domain': domain,
+                'author': author_name, 
+                'year': pub_year,
+                'organization': author_data.get('organization'),  
+                'score': result.get('score', 0.0)  
+            })
+        
+        logger.info(f"Successfully processed {len(web_results)} web results for citations")
+        return web_results
+        
+    except ImportError:
+        logger.error("Tavily client not installed. Run: pip install tavily-python")
+        return []
+    except Exception as e:
+        logger.error(f"Tavily web search failed: {e}")
+        import traceback
+        traceback.print_exc()
+        return []
+
+
+async def search_rag_with_web_fallback(
+    user_query: str,
+    top_k: int = 10,
+    domain: Optional[str] = None,
+    enable_web_fallback: bool = False,
+    always_include_web: bool = False
+) -> Dict[str, Any]:
+    """
+    Search RAG system with optional web search as supplementary context
+    
+    Args:
+        user_query: User's question or analysis request
+        top_k: Number of research chunks to retrieve
+        domain: Optional domain filter
+        enable_web_fallback: Whether to use web search if RAG returns nothing
+        always_include_web: Whether to always include web results alongside RAG (for real-time data)
+    
+    Returns:
+        {
+            'context': 'formatted context for prompt',
+            'citations': CitationManager instance,
+            'chunks': [raw chunks],
+            'source': 'research' or 'web' or 'mixed'
+        }
+    """
+    
+    logger.info(f"Starting RAG search for query: '{user_query[:100]}...'")
+    logger.debug(f"Web mode: {'Always include' if always_include_web else 'Fallback only'}")
+    
+    citation_mgr = CitationManager()
+    
+    try:
+        chunks = await search_research_chunks_from_text(
+            query_text=user_query,
+            top_k=top_k,
+            domain=domain
+        )
+        logger.info(f"Retrieved {len(chunks)} research chunks from vector database")
+    except Exception as e:
+        logger.error(f"RAG search failed: {e}")
+        chunks = []
+    
+    web_results = []
+    
+    # Only perform web search if explicitly enabled
+    if enable_web_fallback:
+        if always_include_web:
+            web_results = await search_web_for_context(user_query, top_k=5)
+            if web_results:
+                logger.info(f"Retrieved {len(web_results)} supplementary web results")
+            else:
+                logger.warning("No supplementary web results found")
+        elif not chunks:
+            web_results = await search_web_for_context(user_query, top_k=5)
+            if web_results:
+                logger.info(f"Retrieved {len(web_results)} fallback web results")
+            else:
+                logger.warning("No fallback web results found")
+    
+    if not chunks and not web_results:
+        logger.warning("No research or web results found, proceeding without citations")
+        return {
+            'context': '',
+            'citations': citation_mgr,
+            'chunks': [],
+            'source': 'none'
+        }
+    
+    context_lines = ["\n## Research Evidence\n"]
+    
+    if chunks:
+        context_lines.append(
+            "The following peer-reviewed research has been retrieved from the knowledge base. "
+            "Use these sources to support your analysis and cite them using [number, Author, Year] notation.\n"
+        )
+        
+        for chunk in chunks:
+            cit_id = await citation_mgr.add_citation(chunk, source_type="research")
+            content_preview = chunk.get('content', '')[:400].strip()
+            
+            citation_data = next((c for c in citation_mgr.citations if c['id'] == cit_id), None)
+            author = citation_data.get('author') if citation_data else None
+            year = citation_data.get('year') if citation_data else None
+            
+            citation_header = f"[{cit_id}"
+            
+            is_real_author = False
+            if author and author != 'Unknown Author':
+                if 'et al' in author.lower() or len(author.split()) > 1:
+                    is_real_author = True
+            
+            if is_real_author:
+                citation_header += f", {author}"
+            if year and year != 'n.d.':
+                citation_header += f", {year}"
+            citation_header += "]"
+            
+            context_lines.append(
+                f"\n{citation_header} {content_preview}{'...' if len(chunk.get('content', '')) > 400 else ''}"
+            )
+            context_lines.append(
+                f"    (Source: {chunk.get('filename', 'N/A')}, Section: {chunk.get('section', 'N/A')}, "
+                f"Domain: {chunk.get('domain', 'N/A')})"
+            )
+    
+    if web_results:
+        if chunks:
+            context_lines.append("\n## Additional Web Sources\n")
+        else:
+            context_lines.append(
+                "The following sources were found via web search. "
+                "Use these to support your analysis and cite them using [number, Author, Year] notation.\n"
+            )
+        
+        for result in web_results:
+            cit_id = await citation_mgr.add_citation(result, source_type="web")
+            snippet = result.get('snippet', '')[:400]
+            
+            citation_data = next((c for c in citation_mgr.citations if c['id'] == cit_id), None)
+            author = citation_data.get('author') if citation_data else None
+            year = citation_data.get('year', 'n.d.') if citation_data else 'n.d.'
+            
+            citation_header = f"[{cit_id}"
+            if author:
+                citation_header += f", {author}"
+                if year:
+                    citation_header += f", {year}"
+            citation_header += "]"
+            
+            context_lines.append(f"\n{citation_header} {snippet}")
+            context_lines.append(f"    (Web Source: {result.get('url', 'N/A')})")
+    
+    context_lines.append("\n---\n")
+    
+    source_type = "research" if chunks and not web_results else \
+                  "web" if web_results and not chunks else \
+                  "mixed"
+        
+    return {
+        'context': '\n'.join(context_lines),
+        'citations': citation_mgr,
+        'chunks': chunks + web_results,
+        'source': source_type
+    }
+
+
+async def generate_with_rag_citations(
+    system_prompt: str,
+    user_query: str,
+    top_k_research: int = 10,
+    domain: Optional[str] = None,
+    max_tokens: int = 6000,
+    enable_web_fallback: bool = False,
+    always_include_web: bool = False
+) -> Dict[str, Any]:
+    """
+    Generate response with automatic RAG retrieval, supplementary web search, and APA-style citations
+    
+    This is the main function to use in your route handlers.
+    It handles RAG search, web search fallback, citation management, and response formatting.
+    
+    Args:
+        system_prompt: Your existing system prompt (unchanged)
+        user_query: User's question/request
+        top_k_research: Number of research chunks to retrieve (default 10)
+        domain: Optional domain filter ("education", "health", etc.)
+        max_tokens: Max response length
+        enable_web_fallback: Enable web search if RAG returns nothing
+        always_include_web: Always include web search for real-time context (not just fallback)
+    
+    Returns:
+        {
+            'response': 'generated text with inline citations and APA references',
+            'citations': [citation metadata],
+            'has_research': bool,
+            'num_sources': int,
+            'source': 'research'|'web'|'mixed'|'none'
+        }
+    """
+    
+    logger.info(f"SINGLE ANALYSIS WITH RAG and SUPPLEMENTARY WEB SEARCH")
+    
+    rag_result = await search_rag_with_web_fallback(
+        user_query=user_query,
+        top_k=top_k_research,
+        domain=domain,
+        enable_web_fallback=enable_web_fallback,
+        always_include_web=always_include_web
+    )
+    
+    enhanced_system = system_prompt
+    
+    if rag_result['context']:
+        enhanced_system = f"""{system_prompt}
+
+{rag_result['context']}
+
+## CITATION FORMAT REQUIREMENTS (MANDATORY)
+
+You MUST use the following APA 7 inline citation format throughout your response:
+
+**Required Format:**
+- **ONLY cite sources that have an author or organization name** shown in the citation headers above
+- Use parentheses (NOT brackets) with author/organization and year: (Author Name, Year)
+- Do NOT include citation numbers in the text
+- Include citations for BOTH research papers AND web sources if they have identifiable authors/organizations
+- If a source has NO author/organization name in the header, do NOT cite it inline
+
+**Correct Format:**
+✓ "Legal aid programs show significant economic impact (Latessa et al., 2002)."
+✓ "Pro bono services are vital (Erin N., 2025)."
+✓ "Multiple studies confirm effectiveness (Smith, 2020; Jones et al., 2019; Pratik P., 2025)."
+✓ "Access to justice remains challenging (RSI S., 2025; CyberCrest T., 2023)."
+
+**Incorrect Formats:**
+✗ "Legal aid programs show impact [1, Latessa et al., 2002]." (No brackets/numbers)
+✗ "Programs are effective [1, 2014]." (No author = don't cite inline)
+✗ "Studies show results [4]." (No author = don't cite inline)
+
+**Important Rules:**
+1. Copy author/organization names EXACTLY as shown in citation headers
+2. Use comma between author and year: (Author, Year)
+3. For multiple sources, use semicolons: (Author1, 2020; Author2, 2019)
+4. Include web sources with their author names (e.g., Erin N., 2025; Pratik P., 2025)
+5. If citation header shows only [1, 2014] with no name, skip it - don't cite inline
+6. Use "n.d." for "no date" when year is not available
+
+**What to do with sources without authors:**
+- You can still reference the information in your analysis
+- Just don't include an inline citation for them
+- They will still appear in the References section at the end
+
+**CRITICAL: DO NOT GENERATE YOUR OWN REFERENCES SECTION**
+- Do NOT create a "## References" or "References" section in your response
+- The references will be automatically appended to your response
+- Only write the analysis content with inline citations
+
+**Write a COMPREHENSIVE and DETAILED analysis** - aim for thorough examination of all aspects with specific examples and deep insights.
+
+Now proceed with your analysis using the evidence provided.
+"""
+    else:
+        logger.debug("No evidence found, using base prompt")
+    
+    logger.info("Generating AI response with RAG context...")
+    raw_response = safe_generate(
+        system_msg=enhanced_system,
+        user_msg=user_query,
+        max_tokens=max_tokens
+    )
+    
+    if not raw_response:
+        logger.error(f"[RAG] Generation failed")
+        return {
+            'response': 'Sorry, I could not generate a response. Please try again.',
+            'citations': [],
+            'has_research': False,
+            'num_sources': 0,
+            'source': 'none'
+        }
+        
+    final_response = raw_response
+    
+    if rag_result['citations'].citations:
+        ref_section = rag_result['citations'].format_reference_section()
+        final_response = raw_response + ref_section
+        
+    return {
+        'response': final_response,
+        'citations': rag_result['citations'].get_citations_metadata(),
+        'has_research': len(rag_result['chunks']) > 0,
+        'num_sources': len(rag_result['citations'].citations),
+        'raw_chunks': rag_result['chunks'],
+        'source': rag_result['source'] 
+    }
+
+
+async def generate_from_precomputed_candidates(
+    system_prompt: str,
+    user_query: str,
+    candidates: List[Dict[str, Any]],
+    max_tokens: int = 6000
+) -> Dict[str, Any]:
+    """
+    Generate the final response given precomputed candidate matches (no RAG search inside).
+    This will build citation metadata, format the context, call `safe_generate`, and append
+    the references section. Returns the same shape as `generate_with_rag_citations`.
+    """
+    logger.info("Generating from precomputed RAG candidates (no web fallback)")
+
+    from app.services.single_analysis_rag import CitationManager  # local import
+
+    citation_mgr = CitationManager()
+
+    # Deduplicate candidates by id while preserving order
+    seen = set()
+    unique_candidates = []
+    for c in candidates:
+        cid = str(c.get('id'))
+        if cid in seen:
+            continue
+        seen.add(cid)
+        unique_candidates.append(c)
+
+    # Add citations (this may trigger metadata extraction)
+    for c in unique_candidates:
+        try:
+            await citation_mgr.add_citation(c, source_type="research")
+        except Exception as e:
+            logger.warning(f"Failed to add citation for candidate {c.get('id')}: {e}")
+
+    # Build context similarly to search_rag_with_web_fallback
+    context_lines = ["\n## Research Evidence\n"]
+    for cit in citation_mgr.citations:
+        cid = cit['id']
+        author = cit.get('author')
+        year = cit.get('year')
+        content_preview = cit.get('content', '')[:400]
+        header = f"[{cid}"
+        if author and author != 'Unknown Author':
+            header += f", {author}"
+        if year and year != 'n.d.':
+            header += f", {year}"
+        header += "]"
+
+        context_lines.append(f"\n{header} {content_preview}{'...' if len(cit.get('content',''))>400 else ''}")
+        context_lines.append(f"    (Source: {cit.get('filename','N/A')}, Section: {cit.get('section','N/A')}, Domain: {cit.get('domain','N/A')})")
+
+    context_lines.append("\n---\n")
+
+    enhanced_system = f"{system_prompt}\n\n" + "".join(context_lines)
+
+    logger.info("Generating AI response from precomputed context...")
+    raw_response = safe_generate(
+        system_msg=enhanced_system,
+        user_msg=user_query,
+        max_tokens=max_tokens
+    )
+
+    if not raw_response:
+        logger.error("Generation failed for precomputed candidates")
+        return {
+            'response': 'Sorry, I could not generate a response. Please try again.',
+            'citations': [],
+            'has_research': False,
+            'num_sources': 0,
+            'raw_chunks': unique_candidates,
+            'source': 'research'
+        }
+
+    ref_section = citation_mgr.format_reference_section()
+    final_response = raw_response + ref_section
+
+    return {
+        'response': final_response,
+        'citations': citation_mgr.get_citations_metadata(),
+        'has_research': len(unique_candidates) > 0,
+        'num_sources': len(citation_mgr.citations),
+        'raw_chunks': unique_candidates,
+        'source': 'research'
+    }
