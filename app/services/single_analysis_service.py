@@ -1,6 +1,26 @@
 """
-Single Analysis Service with Complete Prompts and RAG Integration
-Now using the centralized prompt management system
+Single Analysis Service with Complete Prompts and Hybrid RAG Integration
+
+HYBRID RAG FLOW FOR SINGLE ANALYSIS:
+    User Question/Document
+           ↓
+    [If Document: Chunk with 500 tokens, 50 overlap]
+           ↓
+    Voyage Embedding (dense/meaning) + BM25 (sparse/keywords)
+           ↓
+    Dense Search      Sparse Search
+           ↓              ↓
+           └── Combine Results ──┘
+                   ↓
+               Reranker
+                   ↓
+              Top Documents
+                   ↓
+                  LLM
+                   ↓
+              Final Answer
+
+Now using the centralized prompt management system with hybrid retrieval.
 """
 
 import os
@@ -16,6 +36,22 @@ logger = logging.getLogger(__name__)
 from app.services.comparative_analysis import safe_generate, extract_text_from_upload
 from app.services.single_analysis_rag import generate_with_rag_citations
 from app.services.research import search_research_chunks_from_text
+
+# Import hybrid retrieval for the complete RAG flow
+try:
+    from app.services.hybrid_retrieval import (
+        hybrid_rag_pipeline,
+        hybrid_retrieval_only,
+        is_document as check_is_document,
+        chunk_text as hybrid_chunk_text,
+        llm_chunk_document,
+        build_numbered_context
+    )
+    HYBRID_RETRIEVAL_AVAILABLE = True
+    logger.info("Hybrid retrieval module loaded successfully")
+except ImportError as e:
+    HYBRID_RETRIEVAL_AVAILABLE = False
+    logger.warning(f"Hybrid retrieval not available: {e}")
 
 try:
     import importlib.util
@@ -90,35 +126,82 @@ class SingleAnalysisService:
         }
 
     def _chunk_text(self, text: str, chunk_tokens: int = 500, overlap_tokens: int = 50, prefix: str = "chunk") -> List[Dict[str, Any]]:
-        """Deterministic chunker approximating tokens -> chars (1 token ~ 4 chars).
-
-        Returns list of dicts: {chunk_id, content}
+        """
+        Deterministic chunker with 500 tokens (default) and 50 token overlap.
+        
+        This is used for chunking user documents before sending to the hybrid search.
+        1 token ≈ 4 characters approximation.
+        
+        Args:
+            text: Text to chunk
+            chunk_tokens: Maximum tokens per chunk (default 500)
+            overlap_tokens: Overlap between chunks (default 50)
+            prefix: Prefix for chunk IDs
+        
+        Returns:
+            List of dicts: {chunk_id, content, token_count}
         """
         if not text:
             return []
 
         chars_per_token = 4
-        max_chars = chunk_tokens * chars_per_token
-        overlap_chars = overlap_tokens * chars_per_token
-        step = max(1, max_chars - overlap_chars)
+        max_chars = chunk_tokens * chars_per_token  # 500 tokens = 2000 chars
+        overlap_chars = overlap_tokens * chars_per_token  # 50 tokens = 200 chars
+        step = max(1, max_chars - overlap_chars)  # 450 tokens = 1800 chars step
 
         chunks = []
         i = 0
         counter = 1
         text = text.strip()
         text_len = len(text)
+        
         while i < text_len:
             part = text[i:i + max_chars].strip()
-            if not part:
+            if not part or len(part) < 50:  # Skip very small chunks
                 break
             chunks.append({
                 "chunk_id": f"{prefix}_{counter}",
-                "content": part
+                "content": part,
+                "token_count": len(part) // chars_per_token,
+                "start_char": i,
+                "end_char": min(i + max_chars, text_len)
             })
             counter += 1
             i += step
 
+        logger.debug(f"Created {len(chunks)} chunks from {text_len} chars (500 token max, 50 overlap)")
         return chunks
+    
+    def _is_document_input(self, text: str) -> bool:
+        """
+        Determine if input is a document (requires chunking) or a question.
+        
+        Documents typically have:
+        - Length > 2000 characters
+        - Multiple paragraphs
+        - High word count
+        
+        Questions are typically shorter, single line or paragraph.
+        """
+        if not text:
+            return False
+        
+        text = text.strip()
+        
+        # Length-based heuristics
+        if len(text) > 2000:
+            return True
+        
+        # Multiple paragraphs
+        if text.count("\n\n") > 2:
+            return True
+        
+        # High word count
+        word_count = len(text.split())
+        if word_count > 400:
+            return True
+        
+        return False
                
     async def analyze_files(
         self,
@@ -240,40 +323,148 @@ Use inline citations [1], [2], [3] to reference research sources.
                     initial_context=initial_analysis_context
                 )
             
-            # If a Pinecone index is configured, run per-chunk RAG retrieval using the hybrid index
+            # =========================================================
+            # HYBRID RAG FLOW FOR SINGLE ANALYSIS
+            # =========================================================
+            # Flow:
+            # 1. If document input → Chunk (500 tokens, 50 overlap)
+            # 2. Generate embeddings: Dense (Voyage) + Sparse (BM25)
+            # 3. Hybrid search: Dense + Sparse combined
+            # 4. Combine & deduplicate results
+            # 5. Rerank candidates
+            # 6. Build context with REF ID citations
+            # 7. Generate analysis with LLM
+            
             index_name = os.getenv("PINECONE_INDEX_NAME")
-
-            aggregated_candidates: List[Dict[str, Any]] = []
-
-            if index_name:
-                logger.info("Pinecone index configured - running chunked retrieval")
-                # For each file, chunk and query
+            
+            if index_name and HYBRID_RETRIEVAL_AVAILABLE:
+                logger.info("=" * 60)
+                logger.info("HYBRID RAG PIPELINE - SINGLE ANALYSIS")
+                logger.info("=" * 60)
+                
+                try:
+                    # Use the complete hybrid retrieval pipeline
+                    retrieval_result = await hybrid_retrieval_only(
+                        query_text=semantic_query,
+                        index_name=index_name,
+                        top_k_retrieval=50,  # Retrieve more candidates
+                        top_n_rerank=top_k,   # Return top_k after reranking
+                        chunk_documents=True,  # Chunk if it's a document
+                        namespace="research"
+                    )
+                    
+                    top_candidates = retrieval_result.get("top_results", [])
+                    numbered_context = retrieval_result.get("context", "")
+                    citations_data = retrieval_result.get("citations", [])
+                    
+                    logger.info(f"Hybrid retrieval: {len(top_candidates)} candidates, {len(citations_data)} citations")
+                    
+                    if top_candidates:
+                        # Use the numbered context with REF ID format for generation
+                        try:
+                            from app.services.single_analysis_rag import generate_from_precomputed_candidates
+                            
+                            # Convert hybrid candidates to expected format
+                            formatted_candidates = []
+                            for c in top_candidates:
+                                md = c.get("metadata", {})
+                                formatted_candidates.append({
+                                    "id": c.get("id"),
+                                    "chunk_id": md.get("chunk_id") or c.get("id"),
+                                    "paper_id": md.get("paper_id") or md.get("row_identifier"),
+                                    "filename": md.get("filename") or md.get("study_title") or "",
+                                    "section": md.get("section") or "",
+                                    "domain": md.get("domain") or domain,
+                                    "content": md.get("chunk_text") or md.get("content") or "",
+                                    "distance": c.get("rerank_score") or c.get("score", 0),
+                                    "full_citation": md.get("full_citation") or md.get("Full Citation") or "",
+                                    "study_title": md.get("study_title") or md.get("Study Title") or "",
+                                    "year": md.get("year") or md.get("Year") or "n.d."
+                                })
+                            
+                            result = await generate_from_precomputed_candidates(
+                                system_prompt=system_prompt,
+                                user_query=semantic_query,
+                                candidates=formatted_candidates,
+                                max_tokens=max_tokens
+                            )
+                            
+                            # Add hybrid retrieval metadata
+                            result["retrieval_method"] = "hybrid_rag"
+                            result["chunks_searched"] = len(retrieval_result.get("chunks", []))
+                            
+                        except Exception as e:
+                            logger.warning(f"Generation from hybrid candidates failed: {e}")
+                            # Fallback to standard RAG
+                            result = await generate_with_rag_citations(
+                                system_prompt=system_prompt,
+                                user_query=semantic_query,
+                                top_k_research=top_k,
+                                domain=domain,
+                                max_tokens=max_tokens,
+                                enable_web_fallback=enable_web_fallback
+                            )
+                    else:
+                        logger.warning("Hybrid retrieval returned no candidates, using fallback")
+                        result = await generate_with_rag_citations(
+                            system_prompt=system_prompt,
+                            user_query=semantic_query,
+                            top_k_research=top_k,
+                            domain=domain,
+                            max_tokens=max_tokens,
+                            enable_web_fallback=enable_web_fallback
+                        )
+                        
+                except Exception as e:
+                    logger.error(f"Hybrid RAG pipeline failed: {e}")
+                    import traceback
+                    traceback.print_exc()
+                    # Fallback to standard RAG
+                    result = await generate_with_rag_citations(
+                        system_prompt=system_prompt,
+                        user_query=semantic_query,
+                        top_k_research=top_k,
+                        domain=domain,
+                        max_tokens=max_tokens,
+                        enable_web_fallback=enable_web_fallback
+                    )
+            
+            elif index_name:
+                # Pinecone configured but hybrid retrieval module not available
+                # Use legacy per-chunk retrieval
+                logger.info("Using legacy per-chunk retrieval (hybrid module unavailable)")
+                
+                aggregated_candidates: List[Dict[str, Any]] = []
+                
                 for fc in file_contents:
                     filename = fc.get("filename") or "file"
                     content = fc.get("content", "")
-                    prefix = filename.replace(' ', '_')
+                    prefix = filename.replace(' ', '_').replace('.', '_')
+                    
+                    # Chunk the document (500 tokens, 50 overlap)
                     chunks = self._chunk_text(content, chunk_tokens=500, overlap_tokens=50, prefix=prefix)
+                    logger.info(f"File '{filename}': {len(chunks)} chunks")
+                    
                     for ch in chunks:
                         q = ch.get("content", "")
                         if not q.strip():
                             continue
                         try:
                             from app.services.pinecone_rag import combined_search
-                        except Exception:
-                            combined_search = None
-                        if combined_search is None:
-                            continue
-                        try:
-                            matches = await combined_search(query_text=q, index_name=index_name, top_k=20, top_n=50, rerank=False)
+                            matches = await combined_search(
+                                query_text=q,
+                                index_name=index_name,
+                                top_k=20,
+                                top_n=50,
+                                rerank=False  # We'll do global rerank later
+                            )
+                            for m in matches:
+                                if m and m.get("id"):
+                                    aggregated_candidates.append(m)
                         except Exception as e:
-                            logger.warning(f"Chunk query failed for {filename}: {e}")
-                            matches = []
+                            logger.warning(f"Chunk search failed: {e}")
 
-                        for m in matches:
-                            if m and m.get("id"):
-                                aggregated_candidates.append(m)
-
-                # Deduplicate by id keeping highest score
+                # Deduplicate by ID, keeping highest score
                 cand_map: Dict[str, Dict[str, Any]] = {}
                 for c in aggregated_candidates:
                     cid = str(c.get("id"))
@@ -281,18 +472,18 @@ Use inline citations [1], [2], [3] to reference research sources.
                         cand_map[cid] = c
 
                 candidates = list(cand_map.values())
+                logger.info(f"Aggregated {len(candidates)} unique candidates")
 
-                # Global rerank of aggregated candidates
                 if candidates:
+                    # Global rerank
                     try:
                         from app.services.pinecone_rag import rerank_candidates
                         reranked = await rerank_candidates(semantic_query, candidates)
                         top_candidates = reranked[:top_k]
                     except Exception as e:
-                        logger.warning(f"Global rerank failed: {e}")
+                        logger.warning(f"Rerank failed: {e}")
                         top_candidates = sorted(candidates, key=lambda x: x.get("score", 0), reverse=True)[:top_k]
 
-                    # Generate final response from precomputed candidates (avoids duplicate RAG inside generator)
                     try:
                         from app.services.single_analysis_rag import generate_from_precomputed_candidates
                         result = await generate_from_precomputed_candidates(
@@ -302,8 +493,7 @@ Use inline citations [1], [2], [3] to reference research sources.
                             max_tokens=max_tokens
                         )
                     except Exception as e:
-                        logger.warning(f"generate_from_precomputed_candidates failed: {e}")
-                        # fallback to older flow
+                        logger.warning(f"Generation failed: {e}")
                         result = await generate_with_rag_citations(
                             system_prompt=system_prompt,
                             user_query=semantic_query,
@@ -313,7 +503,6 @@ Use inline citations [1], [2], [3] to reference research sources.
                             enable_web_fallback=enable_web_fallback
                         )
                 else:
-                    logger.warning("No candidates found from chunked retrieval; falling back to normal generator")
                     result = await generate_with_rag_citations(
                         system_prompt=system_prompt,
                         user_query=semantic_query,
@@ -323,7 +512,8 @@ Use inline citations [1], [2], [3] to reference research sources.
                         enable_web_fallback=enable_web_fallback
                     )
             else:
-                # No Pinecone index configured - use existing generator (which may use Supabase fallback)
+                # No Pinecone index configured - use existing generator with Supabase fallback
+                logger.info("No Pinecone index configured, using Supabase fallback")
                 result = await generate_with_rag_citations(
                     system_prompt=system_prompt,
                     user_query=semantic_query,

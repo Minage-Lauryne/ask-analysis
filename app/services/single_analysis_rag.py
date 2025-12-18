@@ -4,7 +4,7 @@ Provides Wikipedia-style citations with automatic web search when RAG returns no
 Supports full PDF access via S3 storage
 """
 
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
 from app.services.research import search_research_chunks_from_text
 from app.services.comparative_analysis import safe_generate
 import re
@@ -1443,6 +1443,163 @@ Now proceed with your analysis using the evidence provided.
     }
 
 
+def format_apa_citation_from_metadata(metadata: Dict[str, Any]) -> str:
+    """
+    Format metadata into APA-style citation string.
+    
+    Args:
+        metadata: Document metadata dict
+    
+    Returns:
+        APA formatted citation string
+    """
+    # Check for explicit full citation first
+    full_citation = (
+        metadata.get("full_citation") or 
+        metadata.get("Full Citation") or
+        metadata.get("citation")
+    )
+    if full_citation:
+        return full_citation
+    
+    parts = []
+    
+    # Authors
+    authors = (
+        metadata.get("authors") or 
+        metadata.get("author") or 
+        metadata.get("Author") or
+        ""
+    )
+    if authors:
+        parts.append(str(authors))
+    
+    # Year
+    year = (
+        metadata.get("year") or 
+        metadata.get("Year") or 
+        metadata.get("Year ") or
+        "n.d."
+    )
+    parts.append(f"({year})")
+    
+    # Title
+    title = (
+        metadata.get("study_title") or 
+        metadata.get("Study Title") or
+        metadata.get("title") or
+        metadata.get("filename") or
+        ""
+    )
+    if title:
+        title = title.replace(".pdf", "").replace("_", " ").strip()
+        parts.append(title)
+    
+    # Source/Journal
+    source = metadata.get("source") or metadata.get("journal") or ""
+    if source:
+        parts.append(source)
+    
+    return ". ".join([p for p in parts if p]) + "."
+
+
+def build_numbered_ref_context(
+    candidates: List[Dict[str, Any]],
+    max_content_chars: int = 2000
+) -> Tuple[str, List[Dict[str, Any]]]:
+    """
+    Build numbered research context with REF ID citations.
+    
+    Format:
+    ### REF ID [1]
+    TITLE: Study Title
+    FULL CITATION: Author et al. (Year). Title. Journal.
+    LINK: http://...
+    CONTENT EXCERPTS:
+    text content here
+    
+    Args:
+        candidates: List of candidate documents
+        max_content_chars: Maximum characters for content excerpts
+    
+    Returns:
+        Tuple of (formatted_context, citations_list)
+    """
+    context_parts = []
+    citations = []
+    
+    for idx, c in enumerate(candidates, start=1):
+        # Get metadata - handle both direct and nested metadata
+        if isinstance(c.get("metadata"), dict):
+            md = c.get("metadata", {})
+        else:
+            md = c  # Candidate itself is the metadata
+        
+        # Extract content
+        content = (
+            md.get("chunk_text") or 
+            md.get("content") or 
+            c.get("content") or
+            md.get("text") or
+            md.get("citation_text") or
+            ""
+        )[:max_content_chars]
+        
+        # Extract title
+        title = (
+            md.get("study_title") or 
+            md.get("Study Title") or
+            c.get("study_title") or
+            md.get("filename") or
+            c.get("filename") or
+            "Untitled Document"
+        )
+        
+        # Format APA citation
+        citation = format_apa_citation_from_metadata({**md, **c})
+        
+        # Get link
+        link = (
+            md.get("study_link") or 
+            md.get("gdrive_link") or
+            md.get("Link to Full Study") or
+            c.get("pdf_url") or
+            md.get("link") or
+            ""
+        )
+        
+        # Build REF ID context block
+        block = (
+            f"### REF ID [{idx}]\n"
+            f"TITLE: {title}\n"
+            f"FULL CITATION: {citation}\n"
+            f"LINK: {link}\n"
+            f"CONTENT EXCERPTS:\n{content}\n"
+        )
+        context_parts.append(block)
+        
+        # Store citation metadata for the citations array
+        citations.append({
+            "ref_id": idx,
+            "id": c.get("id") or c.get("chunk_id"),
+            "title": title,
+            "full_citation": citation,
+            "link": link,
+            "score": c.get("rerank_score") or c.get("distance") or c.get("score", 0),
+            "content_preview": content[:300],
+            "filename": md.get("filename") or c.get("filename", ""),
+            "domain": md.get("domain") or c.get("domain", ""),
+            "section": md.get("section") or c.get("section", ""),
+            "year": md.get("year") or c.get("year", "n.d."),
+            "author": md.get("authors") or md.get("author") or c.get("author", "")
+        })
+    
+    context = "\n\n".join(context_parts)
+    logger.info(f"Built numbered context with {len(citations)} REF IDs")
+    
+    return context, citations
+
+
 async def generate_from_precomputed_candidates(
     system_prompt: str,
     user_query: str,
@@ -1450,55 +1607,85 @@ async def generate_from_precomputed_candidates(
     max_tokens: int = 6000
 ) -> Dict[str, Any]:
     """
-    Generate the final response given precomputed candidate matches (no RAG search inside).
-    This will build citation metadata, format the context, call `safe_generate`, and append
-    the references section. Returns the same shape as `generate_with_rag_citations`.
+    Generate the final response given precomputed candidate matches using REF ID format.
+    
+    This uses the numbered REF ID citation system:
+    - Context shows REF ID [1], [2], [3] with full citations
+    - LLM is instructed to use inline citations like [1], [2]
+    - References section lists all sources
+    
+    Args:
+        system_prompt: Base system prompt
+        user_query: User's query
+        candidates: Precomputed candidate matches from hybrid search
+        max_tokens: Maximum tokens for response
+    
+    Returns:
+        Dict with response, citations, and metadata
     """
-    logger.info("Generating from precomputed RAG candidates (no web fallback)")
-
-    from app.services.single_analysis_rag import CitationManager  # local import
-
-    citation_mgr = CitationManager()
+    logger.info("=" * 60)
+    logger.info("GENERATING FROM PRECOMPUTED CANDIDATES (REF ID FORMAT)")
+    logger.info("=" * 60)
 
     # Deduplicate candidates by id while preserving order
     seen = set()
     unique_candidates = []
     for c in candidates:
-        cid = str(c.get('id'))
-        if cid in seen:
+        cid = str(c.get('id') or c.get('chunk_id', ''))
+        if cid in seen or not cid:
             continue
         seen.add(cid)
         unique_candidates.append(c)
+    
+    logger.info(f"Processing {len(unique_candidates)} unique candidates")
 
-    # Add citations (this may trigger metadata extraction)
-    for c in unique_candidates:
-        try:
-            await citation_mgr.add_citation(c, source_type="research")
-        except Exception as e:
-            logger.warning(f"Failed to add citation for candidate {c.get('id')}: {e}")
+    if not unique_candidates:
+        return {
+            'response': 'No relevant research found for this query.',
+            'citations': [],
+            'has_research': False,
+            'num_sources': 0,
+            'raw_chunks': [],
+            'source': 'research'
+        }
 
-    # Build context similarly to search_rag_with_web_fallback
-    context_lines = ["\n## Research Evidence\n"]
-    for cit in citation_mgr.citations:
-        cid = cit['id']
-        author = cit.get('author')
-        year = cit.get('year')
-        content_preview = cit.get('content', '')[:400]
-        header = f"[{cid}"
-        if author and author != 'Unknown Author':
-            header += f", {author}"
-        if year and year != 'n.d.':
-            header += f", {year}"
-        header += "]"
+    # Build numbered context with REF ID format
+    numbered_context, citations_data = build_numbered_ref_context(unique_candidates)
 
-        context_lines.append(f"\n{header} {content_preview}{'...' if len(cit.get('content',''))>400 else ''}")
-        context_lines.append(f"    (Source: {cit.get('filename','N/A')}, Section: {cit.get('section','N/A')}, Domain: {cit.get('domain','N/A')})")
+    # Enhanced system prompt with REF ID citation instructions
+    ref_id_instructions = """
+## CITATION FORMAT REQUIREMENTS (REF ID System)
 
-    context_lines.append("\n---\n")
+The research context below provides studies labeled as REF ID [1], [2], etc.
 
-    enhanced_system = f"{system_prompt}\n\n" + "".join(context_lines)
+**CRITICAL INSTRUCTIONS:**
+1. **Data Density:** Extract specific statistics, percentages, ages, and sample sizes from the text. Do not generalize if specific numbers are available.
 
-    logger.info("Generating AI response from precomputed context...")
+2. **Inline Citations:** When you state a fact from the research, IMMEDIATELY reference the REF ID in brackets:
+   - Example: "Educational engagement was high (95%) [1]."
+   - Example: "The program showed significant outcomes [2, 3]."
+   - Example: "Multiple studies confirm effectiveness [1, 4, 5]."
+
+3. **Citation Matching:** Only cite REF IDs that appear in the research context below.
+
+4. **Do NOT generate your own References section** - it will be automatically appended.
+
+"""
+
+    enhanced_system = f"""{system_prompt}
+
+{ref_id_instructions}
+
+## RESEARCH CONTEXT
+
+{numbered_context}
+
+---
+
+Now provide your analysis using the evidence above with inline citations [1], [2], etc.
+"""
+
+    logger.info("Generating AI response with REF ID context...")
     raw_response = safe_generate(
         system_msg=enhanced_system,
         user_msg=user_query,
@@ -1516,14 +1703,28 @@ async def generate_from_precomputed_candidates(
             'source': 'research'
         }
 
-    ref_section = citation_mgr.format_reference_section()
+    # Build references section with REF IDs
+    ref_lines = ["\n\n## References\n"]
+    for cit in citations_data:
+        ref_id = cit.get("ref_id", "")
+        full_citation = cit.get("full_citation", "")
+        link = cit.get("link", "")
+        
+        if link:
+            ref_lines.append(f"[{ref_id}] {full_citation} {link}")
+        else:
+            ref_lines.append(f"[{ref_id}] {full_citation}")
+    
+    ref_section = "\n".join(ref_lines)
     final_response = raw_response + ref_section
+
+    logger.info(f"Response generated: {len(final_response)} chars, {len(citations_data)} citations")
 
     return {
         'response': final_response,
-        'citations': citation_mgr.get_citations_metadata(),
+        'citations': citations_data,
         'has_research': len(unique_candidates) > 0,
-        'num_sources': len(citation_mgr.citations),
+        'num_sources': len(citations_data),
         'raw_chunks': unique_candidates,
         'source': 'research'
     }
