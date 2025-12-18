@@ -2,19 +2,28 @@
 pinecone_rag.py
 
 Provides a high-level RAG helper that performs:
- - Dense embedding (via app.services.embeddings.embed_text)
- - Dense index query (Pinecone)
- - Sparse index query (Pinecone sparse index) if available
+ - Dense embedding (Voyage-3-large for semantic meaning)
+ - Sparse embedding (BM25/Pinecone for keyword matching)
+ - Hybrid index query (dense + sparse in single Pinecone index)
  - Candidate merging (union of top-K)
- - Reranking via Anthropic LLM (simple JSON scorer)
+ - Reranking via Anthropic LLM (or Cohere/Pinecone)
 
-This file is intentionally defensive: if Pinecone or Anthropic is not
-installed/configured, it raises informative errors and documents next steps.
+HYBRID SEARCH FLOW:
+    User Query
+         ↓
+    Voyage Embedding (dense/meaning) + BM25 (sparse/keywords)
+         ↓
+    Dense Search      Sparse Search
+         ↓                 ↓
+         └──── Combine Results ────┘
+                    ↓
+                Reranker
+                    ↓
+               Top Documents
 
 Usage:
     from app.services.pinecone_rag import combined_search
-    # Use a single hybrid Pinecone index (dense `values` + `sparse_values`)
-    results = await combined_search(query_text, index_name="my-hybrid-index")
+    results = await combined_search(query_text, index_name="research-hybrid")
 
 """
 from __future__ import annotations
@@ -23,57 +32,163 @@ import os
 import asyncio
 import json
 import logging
-from typing import List, Dict, Any, Optional
-
-from app.services.embeddings import embed_text
+from typing import List, Dict, Any, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
-# Optional BM25 sparse encoder (used for query encoding if available)
+# =========================================================
+# CONFIGURATION
+# =========================================================
+VOYAGE_API_KEY = os.getenv("VOYAGE_API_KEY")
+PINECONE_API_KEY = os.getenv("PINECONE_API_KEY")
+ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
+RERANKER_PROVIDER = os.getenv("RERANKER_PROVIDER", "anthropic").lower()
+
+# =========================================================
+# VOYAGE CLIENT FOR DENSE EMBEDDINGS
+# =========================================================
+_voyage_client = None
+try:
+    import voyageai
+    if VOYAGE_API_KEY:
+        _voyage_client = voyageai.Client(api_key=VOYAGE_API_KEY)
+        logger.info("Voyage client initialized for dense embeddings (voyage-3-large)")
+    else:
+        logger.warning("VOYAGE_API_KEY not set - Voyage embeddings unavailable")
+except ImportError:
+    logger.warning("voyageai package not installed - dense embeddings will use fallback")
+
+# =========================================================
+# BM25 ENCODER FOR SPARSE EMBEDDINGS
+# =========================================================
+_bm25 = None
+_BM25_AVAILABLE = False
 try:
     from pinecone_text.sparse import BM25Encoder
+    _bm25 = BM25Encoder().default()
     _BM25_AVAILABLE = True
-except Exception:
-    BM25Encoder = None
-    _BM25_AVAILABLE = False
-
-# instantiate BM25 encoder if available
-_bm25 = None
-if _BM25_AVAILABLE:
-    try:
-        _bm25 = BM25Encoder().default()
-    except Exception:
-        _bm25 = None
-
-# RERANKER_PROVIDER: 'anthropic' | 'pinecone' | 'cohere'
-RERANKER_PROVIDER = os.getenv("RERANKER_PROVIDER", "anthropic").lower()
+    logger.info("BM25 encoder initialized for sparse embeddings")
+except ImportError:
+    logger.warning("pinecone_text package not installed - sparse embeddings will use fallback")
+except Exception as e:
+    logger.warning(f"BM25 encoder initialization failed: {e}")
 
 
 def _get_pinecone_client():
+    """Get or create Pinecone client."""
     try:
-        # Prefer the lightweight Pinecone client wrapper if present
+        from pinecone import Pinecone as PineconeClient
+        return PineconeClient(api_key=PINECONE_API_KEY)
+    except Exception:
         try:
-            from pinecone import Pinecone as PineconeClient
-            return PineconeClient(api_key=os.getenv("PINECONE_API_KEY"))
-        except Exception:
             import pinecone as pc
-            # initialize if not already
-            api_key = os.getenv("PINECONE_API_KEY")
-            # Prefer new `PINECONE_INDEX_HOST`; avoid legacy `PINECONE_ENV` usage
-            env = os.getenv("PINECONE_INDEX_HOST")
-            if api_key:
+            if PINECONE_API_KEY:
+                env = os.getenv("PINECONE_INDEX_HOST")
                 if env:
-                    pc.init(api_key=api_key, environment=env)
+                    pc.init(api_key=PINECONE_API_KEY, environment=env)
                 else:
-                    pc.init(api_key=api_key)
+                    pc.init(api_key=PINECONE_API_KEY)
             return pc
+        except Exception as e:
+            raise RuntimeError(f"Pinecone client not available: {e}")
+
+
+async def _embed_query_voyage(query: str, model: str = "voyage-3-large") -> Optional[List[float]]:
+    """
+    Generate DENSE embedding using Voyage AI (voyage-3-large).
+    
+    Voyage embeddings capture:
+    - Intent
+    - Context  
+    - Semantics (meaning)
+    
+    Args:
+        query: Text to embed
+        model: Voyage model (voyage-3-large is recommended for best quality)
+    
+    Returns:
+        Dense embedding vector (list of floats)
+    """
+    if _voyage_client is None:
+        logger.warning("Voyage client unavailable, falling back to embeddings.embed_text")
+        from app.services.embeddings import embed_text
+        vec = await asyncio.to_thread(embed_text, query)
+        return vec.tolist() if hasattr(vec, 'tolist') else list(vec)
+    
+    try:
+        def _embed():
+            return _voyage_client.embed(
+                texts=[query],
+                model=model,
+                input_type="query"  # Use "query" for search queries
+            )
+        
+        response = await asyncio.to_thread(_embed)
+        
+        # Extract embedding from response
+        embeddings = getattr(response, "embeddings", None)
+        if embeddings and isinstance(embeddings, list) and embeddings:
+            logger.debug(f"Voyage dense embedding: {len(embeddings[0])} dimensions")
+            return embeddings[0]
+        
+        # Fallback
+        from app.services.embeddings import embed_text
+        vec = await asyncio.to_thread(embed_text, query)
+        return vec.tolist() if hasattr(vec, 'tolist') else list(vec)
+        
     except Exception as e:
-        raise RuntimeError("Pinecone client not available or not configured: " + str(e))
+        logger.error(f"Voyage embedding failed: {e}")
+        from app.services.embeddings import embed_text
+        vec = await asyncio.to_thread(embed_text, query)
+        return vec.tolist() if hasattr(vec, 'tolist') else list(vec)
+
+
+def _encode_sparse_bm25(query: str) -> Optional[Dict[str, Any]]:
+    """
+    Generate SPARSE embedding using BM25.
+    
+    BM25 captures:
+    - Exact keywords ("NVIDIA", "share", "price")
+    - Important terms
+    - Specific entities
+    
+    Args:
+        query: Text to encode
+    
+    Returns:
+        Sparse vector dict compatible with Pinecone
+    """
+    if _bm25 is None:
+        # Fallback: simple token-based sparse vector
+        tokens = [t.strip().lower() for t in query.split() if len(t) > 2]
+        if not tokens:
+            return None
+        return {"tokens": tokens}
+    
+    try:
+        # BM25 encoding - try query-specific method first
+        if hasattr(_bm25, "encode_queries"):
+            sparse = _bm25.encode_queries([query])[0]
+        elif hasattr(_bm25, "encode_query"):
+            sparse = _bm25.encode_query([query])[0]
+        else:
+            sparse = _bm25.encode_documents([query])[0]
+        
+        logger.debug("BM25 sparse encoding generated")
+        return sparse
+        
+    except Exception as e:
+        logger.warning(f"BM25 encoding failed: {e}")
+        tokens = [t.strip().lower() for t in query.split() if len(t) > 2]
+        return {"tokens": tokens} if tokens else None
 
 
 async def _embed_query(query: str):
-    # embed_text is synchronous; run in thread to avoid blocking
-    return await asyncio.to_thread(embed_text, query)
+    """
+    Legacy function - now uses Voyage for dense embedding.
+    Maintained for backward compatibility.
+    """
+    return await _embed_query_voyage(query)
 
 
 async def _query_dense_index(pinecone_client, index_name: str, query_vec, top_k: int = 50) -> List[Dict[str, Any]]:
@@ -291,100 +406,156 @@ async def combined_search(
     top_k: int = 50,
     top_n: int = 10,
     rerank: bool = True,
+    namespace: str = "research"
 ) -> List[Dict[str, Any]]:
     """
-    Perform combined dense + sparse retrieval and rerank.
-
-    Returns top_n candidate dicts containing id, metadata and rerank_score.
+    HYBRID SEARCH: Combined dense + sparse retrieval with reranking.
+    
+    FLOW:
+    1. Dense Embedding (Voyage-3-large) - captures meaning/semantics
+    2. Sparse Embedding (BM25) - captures exact keywords
+    3. Combined Query to Pinecone hybrid index
+    4. Rerank candidates using configured provider (Anthropic/Cohere/Pinecone)
+    5. Return top_n results
+    
+    Args:
+        query_text: User query or document text
+        index_name: Pinecone hybrid index name
+        top_k: Number of initial candidates to retrieve
+        top_n: Number of final results after reranking
+        rerank: Whether to perform reranking
+        namespace: Pinecone namespace (default: "research")
+    
+    Returns:
+        List of candidate dicts with id, score, metadata, and rerank_score
     """
+    logger.info(f"HYBRID SEARCH: '{query_text[:100]}...'")
+    
     pc_client = _get_pinecone_client()
 
-    # 1) dense embed the query
-    q_vec = await _embed_query(query_text)
+    # =========================================================
+    # STEP 1: DENSE EMBEDDING (Voyage-3-large)
+    # =========================================================
+    # Captures: Intent, Context, Semantics
+    logger.debug("Step 1: Generating dense embedding (Voyage-3-large)...")
+    dense_vec = await _embed_query_voyage(query_text)
+    
+    if dense_vec is None:
+        logger.error("Failed to generate dense embedding")
+        return []
+    
+    # Ensure it's a list for Pinecone API
+    if hasattr(dense_vec, 'tolist'):
+        dense_vec = dense_vec.tolist()
+    
+    logger.debug(f"  → Dense vector: {len(dense_vec)} dimensions")
 
-    # 2) prepare sparse query vector (BM25Encoder preferred)
-    sparse_vector = None
-    if _bm25 is not None:
-        try:
-            if hasattr(_bm25, "encode_query"):
-                sparse_vector = _bm25.encode_query([query_text])[0]
-            else:
-                sparse_vector = _bm25.encode_documents([query_text])[0]
-        except Exception as e:
-            logger.debug(f"BM25 encoding failed: {e}")
+    # =========================================================
+    # STEP 2: SPARSE EMBEDDING (BM25)
+    # =========================================================
+    # Captures: "NVIDIA", "share", "price" (exact keywords)
+    logger.debug("Step 2: Generating sparse embedding (BM25)...")
+    sparse_vec = _encode_sparse_bm25(query_text)
+    logger.debug(f"  → Sparse vector generated: {sparse_vec is not None}")
 
-    if sparse_vector is None:
-        tokens = [t.strip().lower() for t in query_text.split() if len(t) > 2]
-        sparse_vector = {"tokens": tokens}
-
-    # 3) query single hybrid index (try several SDK signatures)
+    # =========================================================
+    # STEP 3: HYBRID QUERY (Dense + Sparse combined)
+    # =========================================================
+    logger.debug(f"Step 3: Querying Pinecone hybrid index '{index_name}'...")
+    
     try:
-        try:
-            index = pc_client.Index(index_name) if hasattr(pc_client, "Index") else pc_client.index(index_name)
-        except Exception:
-            index = pc_client.index(index_name)
-
-        def _q_hybrid():
-            # Try modern signatures first
-            try:
-                return index.query(queries=[{"values": q_vec.tolist(), "sparse_vector": sparse_vector}], top_k=top_k, include_metadata=True)
-            except Exception:
-                pass
-            try:
-                return index.query(vector=q_vec.tolist(), sparse_vector=sparse_vector, top_k=top_k, include_metadata=True)
-            except Exception:
-                pass
-            try:
-                # older clients: pass sparse_vector inside queries
-                return index.query(queries=[{"vector": q_vec.tolist(), "sparse_vector": sparse_vector}], top_k=top_k, include_metadata=True)
-            except Exception as e:
-                raise
-
-        resp = await asyncio.to_thread(_q_hybrid)
-
+        index = pc_client.Index(index_name) if hasattr(pc_client, "Index") else pc_client.index(index_name)
     except Exception as e:
-        logger.warning(f"Hybrid query failed for index {index_name}: {e}")
+        logger.error(f"Failed to connect to index '{index_name}': {e}")
         return []
 
-    # Normalize response into matches list
-    matches = []
-    if isinstance(resp, dict):
-        raw = resp.get("results") or resp.get("matches") or resp
-    else:
-        raw = getattr(resp, "matches", resp)
+    def _execute_hybrid_query():
+        """Execute hybrid query with multiple SDK signature fallbacks."""
+        # Try modern Pinecone client signatures
+        try:
+            return index.query(
+                vector=dense_vec,
+                sparse_vector=sparse_vec,
+                top_k=top_k,
+                namespace=namespace,
+                include_metadata=True
+            )
+        except Exception:
+            pass
+        
+        # Try older signature with queries list
+        try:
+            return index.query(
+                queries=[{"values": dense_vec, "sparse_vector": sparse_vec}],
+                top_k=top_k,
+                namespace=namespace,
+                include_metadata=True
+            )
+        except Exception:
+            pass
+        
+        # Fallback to dense-only query
+        try:
+            logger.warning("Falling back to dense-only query")
+            return index.query(
+                vector=dense_vec,
+                top_k=top_k,
+                namespace=namespace,
+                include_metadata=True
+            )
+        except Exception as e:
+            raise RuntimeError(f"All query methods failed: {e}")
 
-    entries = raw if isinstance(raw, list) else raw.get("matches", []) if isinstance(raw, dict) else []
-    for m in entries:
-        item = m if isinstance(m, dict) else (m.to_dict() if hasattr(m, "to_dict") else None)
-        if item is None:
+    try:
+        response = await asyncio.to_thread(_execute_hybrid_query)
+    except Exception as e:
+        logger.error(f"Hybrid query failed: {e}")
+        return []
+
+    # =========================================================
+    # STEP 4: PARSE RESULTS
+    # =========================================================
+    matches = []
+    raw_matches = getattr(response, "matches", None) or response.get("matches", [])
+    
+    for m in raw_matches:
+        if isinstance(m, dict):
+            item = m
+        elif hasattr(m, "to_dict"):
+            item = m.to_dict()
+        else:
             continue
+        
         matches.append({
             "id": item.get("id"),
             "score": item.get("score") or item.get("distance") or 0,
             "metadata": item.get("metadata") or item.get("fields") or {},
-            "raw": item,
         })
 
-    # candidates are simply the matches (single-source)
-    candidates = matches
+    logger.info(f"  → Retrieved {len(matches)} candidates from hybrid search")
 
-    if not candidates:
+    if not matches:
         return []
-    # 5) optionally rerank candidates using configured provider
-    if rerank:
-        provider = RERANKER_PROVIDER
-        if provider == "pinecone":
-            reranked = await _rerank_with_pinecone(pc_client, query_text, candidates)
-        elif provider == "cohere":
-            reranked = await _rerank_with_cohere(query_text, candidates)
-        else:
-            # default: anthropic
-            reranked = await _rerank_with_anthropic(query_text, candidates)
 
+    # =========================================================
+    # STEP 5: RERANK (Optional but recommended)
+    # =========================================================
+    if rerank and matches:
+        logger.debug(f"Step 4: Reranking with provider '{RERANKER_PROVIDER}'...")
+        
+        if RERANKER_PROVIDER == "pinecone":
+            reranked = await _rerank_with_pinecone(pc_client, query_text, matches)
+        elif RERANKER_PROVIDER == "cohere":
+            reranked = await _rerank_with_cohere(query_text, matches)
+        else:
+            # Default: Anthropic reranker
+            reranked = await _rerank_with_anthropic(query_text, matches)
+        
+        logger.info(f"  → Returning top {min(top_n, len(reranked))} after reranking")
         return reranked[:top_n]
 
-    # If rerank is disabled, sort by original score descending and return top_n
-    sorted_candidates = sorted(candidates, key=lambda x: x.get("score", 0), reverse=True)
+    # No reranking - sort by original score
+    sorted_candidates = sorted(matches, key=lambda x: x.get("score", 0), reverse=True)
     return sorted_candidates[:top_n]
 
 
