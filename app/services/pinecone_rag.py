@@ -292,7 +292,7 @@ async def _query_sparse_index(pinecone_client, index_name: str, sparse_vector: D
     return matches
 
 
-async def _rerank_with_anthropic(query: str, candidates: List[Dict[str, Any]], model: str = "claude-sonnet-4-20250514") -> List[Dict[str, Any]]:
+async def _rerank_with_anthropic(query: str, candidates: List[Dict[str, Any]], model: str = "claude-3-5-sonnet-20241022") -> List[Dict[str, Any]]:
     """Simple reranker that asks Anthropic to score each candidate for relevance.
 
     Returns candidates augmented with `rerank_score` float in [0,1].
