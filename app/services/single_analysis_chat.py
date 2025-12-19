@@ -358,6 +358,29 @@ Uploaded Document Content:
     # =========================================================
     logger.info("[4/4] Generating response...")
     
+    # Check if user is asking about THEIR uploaded content (not asking for research)
+    # In this case, we should analyze their content directly without requiring RAG citations
+    content_analysis_keywords = [
+        "this file", "this document", "the above", "uploaded", "compare", 
+        "similarity", "difference", "related to", "summarize this", "analyze this",
+        "what is this", "explain this", "in this document", "in this file"
+    ]
+    is_content_analysis_query = any(kw in user_question.lower() for kw in content_analysis_keywords)
+    has_user_uploads = len(uploaded_content) > 0
+    
+    if has_user_uploads and is_content_analysis_query:
+        logger.info("  → Content analysis query detected - analyzing user's uploaded content directly")
+        # Skip RAG entirely - just analyze the user's content
+        return await _generate_direct_content_analysis(
+            user_question=user_question,
+            uploaded_content=uploaded_content,
+            original_response=original_response,
+            chat_type=chat_type,
+            analysis_id=analysis_id,
+            file_metadata=file_metadata,
+            max_tokens=max_tokens
+        )
+    
     # Build enhanced system prompt - adjust based on whether user uploaded content
     if uploaded_content:
         # User uploaded content - focus on analyzing THEIR content
@@ -483,6 +506,94 @@ Now answer the user's follow-up question with evidence-based insights."""
     logger.info(f"Chat response generated: {len(result.get('response', ''))} chars")
     
     return result
+
+
+async def _generate_direct_content_analysis(
+    user_question: str,
+    uploaded_content: List[Dict[str, Any]],
+    original_response: str,
+    chat_type: str,
+    analysis_id: str,
+    file_metadata: List[Dict[str, Any]],
+    max_tokens: int = 3000
+) -> Dict[str, Any]:
+    """
+    Generate a direct content analysis without RAG search.
+    
+    Used when user uploads a document and asks about IT specifically
+    (e.g., "summarize this", "compare this to the above analysis", etc.)
+    
+    This doesn't require research citations - it's analyzing the user's OWN content.
+    """
+    logger.info("=" * 60)
+    logger.info("DIRECT CONTENT ANALYSIS (No RAG Required)")
+    logger.info("=" * 60)
+    
+    # Build content from uploads
+    uploaded_text = ""
+    for i, content in enumerate(uploaded_content, 1):
+        uploaded_text += f"\n\n### Uploaded Document {i}: {content['filename']}\n"
+        uploaded_text += content['content'][:8000]  # Include substantial content
+        if len(content['content']) > 8000:
+            uploaded_text += "\n[... document continues ...]"
+    
+    # Build system prompt for direct analysis
+    system_prompt = f"""You are an expert document analyst. The user has uploaded a document and is asking a question about it.
+
+## Your Task
+Analyze the uploaded document and answer the user's question. Focus on:
+1. The actual content of the uploaded document
+2. How it relates to the previous analysis (if the user asks about comparison)
+3. Key findings, themes, and insights from the document
+
+## Previous Analysis Summary (for comparison if needed)
+{_extract_key_findings(original_response, max_chars=3000)}
+
+## Uploaded Document Content
+{uploaded_text}
+
+---
+
+**Important**: You are analyzing the USER'S document. No external research citations are needed.
+Provide a thorough, helpful analysis based on the document content above."""
+
+    user_msg = f"User Question: {user_question}"
+    
+    # Generate response using Anthropic
+    try:
+        answer = safe_generate(system_prompt, user_msg, max_tokens=max_tokens)
+        
+        if not answer:
+            answer = "I apologize, but I couldn't generate an analysis. Please try again."
+        
+        logger.info(f"Direct content analysis generated: {len(answer)} chars")
+        
+        return {
+            "response": answer,
+            "citations": [],
+            "has_research": False,
+            "num_sources": 0,
+            "source": "direct_analysis",
+            "analysis_type": "content_comparison",
+            "original_analysis_type": chat_type,
+            "original_analysis_id": analysis_id,
+            "files_analyzed": [f["filename"] for f in file_metadata],
+            "is_follow_up": True,
+            "uploaded_in_chat": [c["filename"] for c in uploaded_content],
+            "uploaded_content_types": [c["type"] for c in uploaded_content],
+            "note": "This is a direct content analysis of your uploaded document. No external research citations were required."
+        }
+        
+    except Exception as e:
+        logger.error(f"Direct content analysis failed: {e}")
+        return {
+            "response": f"Analysis failed: {str(e)}. Please try again.",
+            "citations": [],
+            "has_research": False,
+            "num_sources": 0,
+            "is_follow_up": True,
+            "uploaded_in_chat": [c["filename"] for c in uploaded_content]
+        }
 
 
 def _format_file_list(file_metadata: list) -> str:
