@@ -432,8 +432,13 @@ The analysis was {content_analysis.get('total_words', 'unknown')} words and cont
    - Your expertise in philanthropy and nonprofit evaluation
 
 2. **CITATION FORMAT**: Use APA 7 inline citations when referencing research.
-   - Format: Author et al. (Year) or (Author et al., Year)
-   - Example: "Katz et al. (2017) demonstrated that..." or "...showed significant impact (Miller et al., 2015)."
+   - Format: (Author et al., Year)
+   - Single Author: (Smith, 2020)
+   - Two authors: (Smith & Johnson, 2020)
+   - Multiple authors: (Smith et al., 2020)
+   - **Placement (Strict):** Citations must appear **ONLY at the very end of the sentence**, immediately before the period.
+   - ✅ CORRECT: "Research shows significant impact (Miller et al., 2015)."
+   - ❌ WRONG (Narrative): "Miller et al. (2015) demonstrated that..."
    - Do NOT use numbered citations like [1], [2], [3]
    - Only cite sources that have author names in the research context.
 

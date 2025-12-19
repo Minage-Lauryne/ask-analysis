@@ -11,25 +11,24 @@ def get_example_citations(count: int) -> str:
     return f"""
 ### Citation Format (APA 7 Inline Citations)
 
-Use APA 7 inline citation format throughout your analysis. Include at least {count} research citations woven naturally into your text.
+Use APA 7 inline citation format throughout your analysis. Include at least {count} research citations.
 
 **How to cite:**
+- Single Author: Smith, (2020)
+- Two authors: Smith & Johnson, (2020)
+- Multiple authors: Smith et al., (2020)
+- Multiple sources: Smith, (2020); Jones et al., (2019)
 
-1. **Narrative citations** (author as subject):
-   - "Katz et al. (2017) developed a prediction model achieving 70.2% accuracy."
-   - "Smith and Johnson (2020) demonstrated significant improvements."
-
-2. **Parenthetical citations** (at end of statement):
-   - "The treatment reduced recidivism by 45% (Miller et al., 2015)."
-   - "Multiple studies confirm this approach (Smith, 2020; Jones et al., 2019)."
-
-<example>
-Classification techniques using AI have been explored extensively. The prediction model developed by Katz et al. (2017) employed statistical ensemble methods achieving 70.2% accuracy at the case outcome level. Sulea et al. (2017) explored using linear SVM classifiers, achieving an f1 score of 96% in predicting case rulings. Craigle (2019) identified diverse applications of AI in law including legal research platforms and chatbots.
-</example>
+**Placement (Strict):** Citations must appear **ONLY at the very end of the sentence**, immediately before the period.
+- ✅ CORRECT: "The treatment group showed a 12% reduction in recidivism (Miller et al., 2015)."
+- ❌ WRONG (Mid-sentence): "The study (Miller et al., 2015) showed a reduction..."
+- ❌ WRONG (Narrative): "Miller et al. (2015) states that the group showed..."
+- **Correction Strategy:** If you want to say "Miller found X", rephrase it to "Research shows X (Miller, 2015)."
 
 **Important:**
 - Do NOT use numbered citations like [1], [2], [3]
 - Only cite sources with identifiable author names
+- If no author name is available, do NOT include inline citation at all
 - A References section will be automatically appended
 """
 

@@ -1369,33 +1369,26 @@ async def generate_with_rag_citations(
 **CRITICAL: Use APA 7 inline citation format throughout your response.**
 
 **Required Format:**
-- Weave citations naturally into your writing using author names and years
+- Single Author: (Smith, 2020)
+- Two authors: (Smith & Johnson, 2020)
+- Multiple authors: (Smith et al., 2020)
+- Multiple sources: (Smith, 2020; Jones et al., 2019)
 - Do NOT use numbered citations like [1], [2], [3]
 - Only cite sources that have identifiable author names
 
-**Citation Styles:**
-
-1. **Narrative citations** (author as part of sentence):
-   - Single author: "Smith (2020) found that..."
-   - Two authors: "Smith and Johnson (2020) demonstrated..."
-   - 3+ authors: "Katz et al. (2017) achieved 70.2% accuracy..."
-
-2. **Parenthetical citations** (at end of claim):
-   - Single author: "...showed significant impact (Smith, 2020)."
-   - Two authors: "...was effective (Smith & Johnson, 2020)."
-   - 3+ authors: "...reduced recidivism rates (Miller et al., 2015)."
-   - Multiple sources: "...confirmed by research (Smith, 2020; Jones et al., 2019)."
+**Placement (Strict):** Citations must appear **ONLY at the very end of the sentence**, immediately before the period.
 
 **Correct Examples:**
-✅ "The prediction model developed by Katz et al. (2017) employed statistical ensemble methods achieving 70.2% accuracy."
-✅ "Sulea et al. (2017) explored using linear SVM classifiers, achieving an f1 score of 96%."
+✅ "The treatment group showed a 12% reduction in recidivism (Miller et al., 2015)."
 ✅ "Research demonstrates significant improvements in outcomes (Latessa et al., 2002)."
 ✅ "Multiple studies confirm program effectiveness (Smith, 2020; Miller et al., 2015)."
 
 **Incorrect Examples:**
-❌ "Studies show impact [1]." (No numbered citations)
-❌ "Research confirms [1, 2, 3]." (No brackets)
-❌ "[Smith et al., 2020] found..." (Don't start with brackets)
+❌ "The study (Miller et al., 2015) showed a reduction..." (Mid-sentence placement)
+❌ "Miller et al. (2015) states that the group showed..." (Narrative style)
+❌ "Studies show impact [1]." (Numbered citations)
+
+**Correction Strategy:** If you want to say "Miller found X", rephrase it to "Research shows X (Miller, 2015)."
 
 **Important Rules:**
 1. Extract author names from the research context provided
@@ -1965,28 +1958,22 @@ The research context below provides studies with author names and years.
 1. **Data Density:** Extract specific statistics, percentages, ages, and sample sizes from the text. Do not generalize if specific numbers are available.
 
 2. **MANDATORY: Use APA 7 inline citation format**
-   - ONLY cite sources with author names using the format: Author et al. (Year) or (Author et al., Year)
-   - Single Author: Smith (2020) found that... OR ...was effective (Smith, 2020).
-   - Two authors: Smith and Johnson (2020) OR (Smith & Johnson, 2020)
-   - Multiple authors: Smith et al. (2020) OR (Smith et al., 2020)
+   - Single Author: (Smith, 2020)
+   - Two authors: (Smith & Johnson, 2020)
+   - Multiple authors: (Smith et al., 2020)
    - Multiple sources: (Smith, 2020; Jones et al., 2019)
    - **If no author name is available, do NOT include inline citation**
    - Do NOT use brackets with numbers like [1] or [2]
 
-3. **Natural Integration:** Weave citations naturally into sentences:
-   - ✅ CORRECT: "The prediction model developed by Katz et al. (2017) achieved 70.2% accuracy at the case outcome level."
-   - ✅ CORRECT: "Research demonstrates significant improvements in recidivism rates (Miller et al., 2015)."
-   - ✅ CORRECT: "Sulea et al. (2017) explored using linear SVM classifiers, achieving an f1 score of 96%."
-   - ❌ WRONG: "The study [1] showed results..."
-   - ❌ WRONG: "Research shows impact [2, 3]."
+3. **Placement (Strict):** Citations must appear **ONLY at the very end of the sentence**, immediately before the period.
+   - ✅ CORRECT: "The treatment group showed a 12% reduction in recidivism (Miller et al., 2015)."
+   - ❌ WRONG (Mid-sentence): "The study (Miller et al., 2015) showed a reduction..."
+   - ❌ WRONG (Narrative): "Miller et al. (2015) states that the group showed..."
+   - **Correction Strategy:** If you want to say "Miller found X", rephrase it to "Research shows X (Miller, 2015)."
 
-4. **Citation Placement:** Citations can appear mid-sentence when introducing authors, or at sentence end in parentheses:
-   - Narrative: "Latessa et al. (2002) demonstrated that..."
-   - Parenthetical: "...showed significant outcomes (Latessa et al., 2002)."
+4. **Citation Matching:** Only cite sources that have author information in the research context.
 
-5. **Citation Matching:** Only cite sources that have author information in the research context.
-
-6. **Do NOT generate a References section** - it will be automatically appended.
+5. **Do NOT generate a References section** - it will be automatically appended.
 
 """
 

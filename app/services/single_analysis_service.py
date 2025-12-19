@@ -793,9 +793,14 @@ Stay focused on providing practical, actionable insights supported by research, 
 {file_context}
 
 ## Research Integration (APA 7 Inline Citations):
-- Use APA 7 format: Author et al. (Year) or (Author et al., Year)
-- Weave citations naturally: "Smith et al. (2020) found..." or "...was effective (Smith et al., 2020)."
+- Use APA 7 format: (Author et al., Year)
+- Single Author: (Smith, 2020)
+- Two authors: (Smith & Johnson, 2020)
+- Multiple authors: (Smith et al., 2020)
 - Multiple sources: (Smith, 2020; Jones et al., 2019)
+- **Placement (Strict):** Citations must appear **ONLY at the very end of the sentence**, immediately before the period.
+  - ✅ CORRECT: "Research shows significant findings (Smith et al., 2020)."
+  - ❌ WRONG (Narrative): "Smith et al. (2020) found..."
 - Do NOT use numbered citations like [1], [2], [3]
 - ALWAYS cite the authors of specific studies used in your analysis
 - A references section will be automatically appended
@@ -910,7 +915,8 @@ Focus your deepest analysis where the bias could affect **real-world outcomes**�
 {file_context}
 
 ## Research Integration (APA 7 Inline Citations):
-- Use APA 7 format: Author et al. (Year) or (Author et al., Year)
+- Use APA 7 format: (Author et al., Year)
+- **Placement (Strict):** Citations must appear **ONLY at the very end of the sentence**, immediately before the period.
 - Cite studies that support your bias analysis
 - Do NOT use numbered citations like [1], [2], [3]
 - A references section will be automatically appended
@@ -1022,7 +1028,8 @@ Use this prompt to evaluate:
 {file_context}
 
 ## Research Integration (APA 7 Inline Citations):
-- Use APA 7 format: Author et al. (Year) or (Author et al., Year)
+- Use APA 7 format: (Author et al., Year)
+- **Placement (Strict):** Citations must appear **ONLY at the very end of the sentence**, immediately before the period.
 - Cite studies that support your counterpoints
 - Do NOT use numbered citations like [1], [2], [3]
 - A references section will be automatically appended
@@ -1157,7 +1164,8 @@ This helps shape the initial landscape analysis and reduces the need for follow-
 {file_context}
 
 ## Research Integration (APA 7 Inline Citations):
-- Use APA 7 format: Author et al. (Year) or (Author et al., Year)
+- Use APA 7 format: (Author et al., Year)
+- **Placement (Strict):** Citations must appear **ONLY at the very end of the sentence**, immediately before the period.
 - Cite studies that support your landscape mapping
 - Do NOT use numbered citations like [1], [2], [3]
 - A references section will be automatically appended
@@ -1217,7 +1225,8 @@ One paragraph final assessment with clear funding recommendation (recommend, rec
 {file_context}
 
 ## Research Integration (APA 7 Inline Citations):
-- Use APA 7 format: Author et al. (Year) or (Author et al., Year)
+- Use APA 7 format: (Author et al., Year)
+- **Placement (Strict):** Citations must appear **ONLY at the very end of the sentence**, immediately before the period.
 - Cite key research that supports your summary
 - Do NOT use numbered citations like [1], [2], [3]
 - A references section will be automatically appended
@@ -1371,7 +1380,8 @@ Outline key questions or areas of uncertainty that warrant observation or inquir
 {file_context}
 
 ## Research Integration (APA 7 Inline Citations):
-- Use APA 7 format: Author et al. (Year) or (Author et al., Year)
+- Use APA 7 format: (Author et al., Year)
+- **Placement (Strict):** Citations must appear **ONLY at the very end of the sentence**, immediately before the period.
 - Cite studies that support your analysis
 - Do NOT use numbered citations like [1], [2], [3]
 - A references section will be automatically appended
