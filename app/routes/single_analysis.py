@@ -325,7 +325,9 @@ async def chat_with_analysis(
     user_id: Optional[str] = Form(None, description="User ID for access control")
 ):
     """
-    Chat endpoint for follow-up questions about a single analysis
+    BASIC Chat endpoint for follow-up questions about a single analysis (TEXT ONLY)
+    
+    For file/image uploads, use the ENHANCED endpoint: POST /single-analysis/chat/v2
     
     This allows users to:
     1. Ask follow-up questions about their analysis
@@ -401,6 +403,331 @@ async def chat_with_analysis(
         raise HTTPException(
             status_code=500,
             detail=f"Failed to generate chat response: {str(e)}"
+        )
+
+
+@router.post("/chat/v2")
+async def enhanced_chat_with_analysis(
+    request: Request,
+    analysis_id: str = Form(..., description="ID of the analysis to chat about"),
+    message: str = Form("", description="User's follow-up question or instruction"),
+    domain: Optional[str] = Form(None, description="Optional domain filter for research"),
+    top_k: int = Form(5, description="Number of research sources to retrieve"),
+    max_tokens: int = Form(2000, description="Maximum response length"),
+    organization_id: Optional[str] = Form(None, description="Organization ID for access control"),
+    user_id: Optional[str] = Form(None, description="User ID for access control"),
+    use_hybrid_rag: bool = Form(True, description="Use hybrid RAG for citations")
+):
+    """
+    ENHANCED Chat endpoint supporting FILES + IMAGES + TEXT
+    
+    This is the recommended endpoint for follow-up interactions as it supports:
+    
+    1. **Text messages** - Questions or instructions
+    2. **Document uploads** - PDF, DOCX, DOC, TXT files (content extracted)
+    3. **Image uploads** - PNG, JPG, JPEG, GIF, etc. (OCR text extraction)
+    4. **Combined inputs** - Any combination of the above
+    
+    The hybrid RAG system searches for relevant research citations based on:
+    - Your follow-up question
+    - Content from any uploaded files/images
+    - Context from the original analysis
+    
+    **File Input Options:**
+    - `files[]` - Array of files (documents or images)
+    
+    Example with text only:
+    ```bash
+    curl -X POST "http://localhost:8080/single-analysis/chat/v2" \
+      -F "analysis_id=abc-123-def" \
+      -F "message=What does this mean for implementation?" \
+      -F "user_id=user-123"
+    ```
+    
+    Example with file upload:
+    ```bash
+    curl -X POST "http://localhost:8080/single-analysis/chat/v2" \
+      -F "analysis_id=abc-123-def" \
+      -F "message=How does this compare to our original analysis?" \
+      -F "files[]=@new_document.pdf" \
+      -F "user_id=user-123"
+    ```
+    
+    Example with image upload (OCR):
+    ```bash
+    curl -X POST "http://localhost:8080/single-analysis/chat/v2" \
+      -F "analysis_id=abc-123-def" \
+      -F "message=What does this screenshot show about outcomes?" \
+      -F "files[]=@table_screenshot.png" \
+      -F "user_id=user-123"
+    ```
+    
+    Response includes:
+    - response: The generated answer with citations
+    - citations: List of research sources used
+    - uploaded_in_chat: List of files processed in this message
+    - is_follow_up: Always True for chat responses
+    """
+    
+    logger.info("=" * 60)
+    logger.info("ENHANCED CHAT ENDPOINT V2")
+    logger.info("=" * 60)
+    
+    # Extract files from form
+    form = await request.form()
+    files_raw = form.getlist("files") or form.getlist("files[]")
+    
+    valid_files = []
+    if files_raw:
+        for f in files_raw:
+            if hasattr(f, 'filename') and hasattr(f, 'read'):
+                try:
+                    # Check if file has content
+                    content = await f.read(10)
+                    await f.seek(0)
+                    if f.filename and f.filename.strip() != "" and len(content) > 0:
+                        valid_files.append(f)
+                        logger.info(f"  File accepted: {f.filename}")
+                    else:
+                        logger.warning(f"  Skipping empty file: {f.filename}")
+                except Exception as e:
+                    logger.error(f"  Error reading file: {e}")
+            elif isinstance(f, str):
+                logger.debug(f"  Skipping string placeholder: {f}")
+    
+    logger.info(f"Chat request - Analysis: {analysis_id}, Files: {len(valid_files)}, Message: {len(message)} chars")
+    
+    # Validate inputs
+    if not message.strip() and not valid_files:
+        raise HTTPException(
+            status_code=400,
+            detail="At least one of 'message' or 'files' must be provided for chat"
+        )
+    
+    # Process optional parameters
+    actual_user_id = None
+    if user_id and user_id.strip() and user_id.lower() not in ["none", "null", "string"]:
+        actual_user_id = user_id.strip()
+    
+    actual_org_id = None
+    if organization_id and organization_id.strip() and organization_id.lower() not in ["none", "null", "string"]:
+        actual_org_id = organization_id.strip()
+    
+    actual_domain = None
+    if domain and domain.strip() and domain.lower() not in ["none", "null", "string"]:
+        actual_domain = domain.strip()
+    
+    actual_message = message.strip() if message else ""
+    
+    try:
+        # Retrieve the original analysis
+        logger.info(f"Looking up analysis: {analysis_id}")
+        analysis_data = get_single_analysis(
+            analysis_id=analysis_id,
+            organization_id=actual_org_id,
+            user_id=actual_user_id
+        )
+        
+        if not analysis_data:
+            logger.error(f"Analysis not found: {analysis_id}")
+            raise HTTPException(
+                status_code=404,
+                detail=(
+                    f"Analysis '{analysis_id}' not found. "
+                    "Make sure the analysis_id is correct and that you have access to it. "
+                    "The analysis must have been created with a user_id or organization_id to be retrievable."
+                )
+            )
+        
+        logger.info(f"Found analysis: {analysis_data.get('chat_type', 'UNKNOWN')}")
+        
+        # Generate chat response with the enhanced service
+        result = await generate_single_analysis_chat_response(
+            user_question=actual_message if actual_message else "Please analyze the uploaded content.",
+            analysis_data=analysis_data,
+            domain=actual_domain,
+            top_k=top_k,
+            max_tokens=max_tokens,
+            files=valid_files if valid_files else None,
+            use_hybrid_rag=use_hybrid_rag
+        )
+        
+        logger.info(f"Chat response generated: {len(result.get('response', ''))} chars")
+        logger.info(f"  → Citations: {result.get('num_sources', 0)}")
+        logger.info(f"  → Uploaded processed: {result.get('uploaded_in_chat', [])}")
+        
+        return result
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Enhanced chat generation failed: {e}", exc_info=True)
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to generate chat response: {str(e)}"
+        )
+
+
+@router.post("/chat/standalone")
+async def standalone_chat(
+    request: Request,
+    message: str = Form("", description="User's question or instruction"),
+    domain: Optional[str] = Form(None, description="Optional domain filter for research"),
+    top_k: int = Form(10, description="Number of research sources to retrieve"),
+    max_tokens: int = Form(3000, description="Maximum response length"),
+    organization_id: Optional[str] = Form(None, description="Organization ID"),
+    user_id: Optional[str] = Form(None, description="User ID"),
+    use_hybrid_rag: bool = Form(True, description="Use hybrid RAG for citations")
+):
+    """
+    STANDALONE Chat endpoint - NO prior analysis required
+    
+    Use this for direct Q&A with the research database without needing 
+    to create an initial analysis first.
+    
+    Supports:
+    1. **Text messages** - Questions or instructions
+    2. **Document uploads** - PDF, DOCX, DOC, TXT files (content analyzed)
+    3. **Image uploads** - PNG, JPG, JPEG, etc. (OCR text extraction)
+    4. **Combined inputs** - Any combination of the above
+    
+    Example with text only:
+    ```bash
+    curl -X POST "http://localhost:8080/single-analysis/chat/standalone" \
+      -F "message=What research exists on family therapy for youth recidivism?"
+    ```
+    
+    Example with document:
+    ```bash
+    curl -X POST "http://localhost:8080/single-analysis/chat/standalone" \
+      -F "message=Summarize this document and find related research" \
+      -F "files[]=@my_document.pdf"
+    ```
+    
+    Response includes:
+    - response: Answer with [1], [2] style citations
+    - citations: List of research sources used
+    - has_research: Whether research citations were found
+    """
+    
+    logger.info("=" * 60)
+    logger.info("STANDALONE CHAT ENDPOINT")
+    logger.info("=" * 60)
+    
+    # Extract files from form
+    form = await request.form()
+    files_raw = form.getlist("files") or form.getlist("files[]")
+    
+    valid_files = []
+    if files_raw:
+        for f in files_raw:
+            if hasattr(f, 'filename') and hasattr(f, 'read'):
+                try:
+                    content = await f.read(10)
+                    await f.seek(0)
+                    if f.filename and f.filename.strip() != "" and len(content) > 0:
+                        valid_files.append(f)
+                        logger.info(f"  File accepted: {f.filename}")
+                except Exception as e:
+                    logger.error(f"  Error reading file: {e}")
+    
+    logger.info(f"Standalone chat - Files: {len(valid_files)}, Message: {len(message)} chars")
+    
+    if not message.strip() and not valid_files:
+        raise HTTPException(
+            status_code=400,
+            detail="At least one of 'message' or 'files' must be provided"
+        )
+    
+    # Process optional parameters
+    actual_domain = None
+    if domain and domain.strip() and domain.lower() not in ["none", "null", "string"]:
+        actual_domain = domain.strip()
+    
+    actual_message = message.strip() if message else "Please analyze the uploaded content."
+    
+    try:
+        # Extract content from files if provided
+        from app.services.single_analysis_chat import extract_content_from_upload
+        
+        uploaded_content = []
+        combined_text = actual_message
+        
+        if valid_files:
+            logger.info(f"Extracting content from {len(valid_files)} files...")
+            for f in valid_files:
+                extraction = await extract_content_from_upload(f)
+                if extraction["success"]:
+                    uploaded_content.append(extraction)
+                    combined_text += f"\n\n[Content from {extraction['filename']}]:\n{extraction['content'][:2000]}"
+                    logger.info(f"  ✓ {extraction['filename']}: {extraction['length']} chars")
+        
+        # Use the hybrid retrieval directly for standalone chat
+        import os
+        index_name = os.getenv("PINECONE_INDEX_NAME")
+        
+        if use_hybrid_rag and index_name:
+            try:
+                from app.services.hybrid_retrieval import hybrid_rag_pipeline
+                
+                result = await hybrid_rag_pipeline(
+                    query_text=combined_text,
+                    index_name=index_name,
+                    top_k_retrieval=30,
+                    top_n_rerank=top_k,
+                    chunk_documents=len(combined_text) > 1500,  # Chunk if long
+                    namespace="research",
+                    max_tokens=max_tokens
+                )
+                
+                # Add metadata
+                result["uploaded_files"] = [c["filename"] for c in uploaded_content]
+                result["is_standalone"] = True
+                
+            except Exception as e:
+                logger.warning(f"Hybrid RAG failed: {e}, using fallback")
+                from app.services.single_analysis_rag import generate_with_rag_citations
+                
+                result = await generate_with_rag_citations(
+                    system_prompt="You are a research assistant. Answer the user's question using evidence from the research database. Use [1], [2] style citations.",
+                    user_query=combined_text,
+                    top_k_research=top_k,
+                    domain=actual_domain,
+                    max_tokens=max_tokens,
+                    enable_web_fallback=False
+                )
+                result["uploaded_files"] = [c["filename"] for c in uploaded_content]
+                result["is_standalone"] = True
+        else:
+            # Fallback without hybrid
+            from app.services.single_analysis_rag import generate_with_rag_citations
+            
+            result = await generate_with_rag_citations(
+                system_prompt="You are a research assistant. Answer the user's question using evidence from the research database. Use [1], [2] style citations.",
+                user_query=combined_text,
+                top_k_research=top_k,
+                domain=actual_domain,
+                max_tokens=max_tokens,
+                enable_web_fallback=False
+            )
+            result["uploaded_files"] = [c["filename"] for c in uploaded_content]
+            result["is_standalone"] = True
+        
+        logger.info(f"Standalone response: {len(result.get('response', ''))} chars, {result.get('num_sources', 0)} citations")
+        
+        return result
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Standalone chat failed: {e}", exc_info=True)
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to generate response: {str(e)}"
         )
 
 
