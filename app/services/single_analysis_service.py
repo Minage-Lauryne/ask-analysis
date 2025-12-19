@@ -431,42 +431,69 @@ Use inline citations [1], [2], [3] to reference research sources.
             
             elif index_name:
                 # Pinecone configured but hybrid retrieval module not available
-                # Use OPTIMIZED single-query retrieval (NOT per-chunk - that's too slow!)
-                logger.info("Using optimized single-query retrieval")
+                # Use OPTIMIZED strategic-sampling retrieval
+                logger.info("Using optimized strategic-sampling retrieval")
                 
                 aggregated_candidates: List[Dict[str, Any]] = []
                 
-                # Build ONE representative query from all documents
-                # Instead of searching for every chunk (200+ searches), do MAX 3 searches
-                combined_summary = []
+                # Build strategic samples from all documents
+                # Sample from BEGINNING, MIDDLE, and END to capture full context
+                strategic_samples = []
+                
                 for fc in file_contents:
                     filename = fc.get("filename") or "file"
-                    content = fc.get("content", "")[:3000]  # First 3000 chars per file
-                    combined_summary.append(f"[{filename}]: {content[:1500]}")
+                    content = fc.get("content", "")
+                    content_len = len(content)
+                    
+                    if content_len > 0:
+                        # Sample from different parts of the document
+                        intro = content[:2000]  # Beginning - usually abstract/intro
+                        
+                        if content_len > 6000:
+                            # Middle section - often contains key findings
+                            mid_start = content_len // 2 - 1000
+                            middle = content[mid_start:mid_start + 2000]
+                        else:
+                            middle = ""
+                        
+                        if content_len > 4000:
+                            # End section - usually conclusion/results
+                            conclusion = content[-2000:]
+                        else:
+                            conclusion = ""
+                        
+                        # Combine strategic samples for this file
+                        file_sample = f"[{filename}]:\nINTRO: {intro[:1000]}"
+                        if middle:
+                            file_sample += f"\nMIDDLE: {middle[:800]}"
+                        if conclusion:
+                            file_sample += f"\nCONCLUSION: {conclusion[:800]}"
+                        
+                        strategic_samples.append(file_sample)
+                        logger.info(f"  Sampled '{filename}': intro + {'middle + ' if middle else ''}{'conclusion' if conclusion else ''}")
                 
-                # Create representative queries (max 3)
+                # Create search queries (max 5 for better coverage)
                 representative_queries = []
                 
-                # Query 1: User's question if provided
+                # Query 1: User's question (highest priority)
                 if user_query:
-                    representative_queries.append(user_query)
+                    representative_queries.append(("user_query", user_query))
                 
-                # Query 2: Combined file summary (first 2000 chars)
-                combined_text = "\n".join(combined_summary)[:2000]
-                if combined_text.strip():
-                    representative_queries.append(combined_text)
+                # Query 2-4: Strategic samples from each file (up to 3 files)
+                for i, sample in enumerate(strategic_samples[:3]):
+                    representative_queries.append((f"file_{i+1}_sample", sample[:2500]))
                 
-                # Query 3: Key terms from documents (if different from above)
-                if len(representative_queries) < 2 and combined_summary:
-                    # Use first file's intro
-                    representative_queries.append(combined_summary[0][:1000])
+                # Query 5: Combined intro from all files
+                all_intros = " ".join([fc.get("content", "")[:800] for fc in file_contents])
+                if all_intros.strip() and len(representative_queries) < 5:
+                    representative_queries.append(("combined_intros", all_intros[:2000]))
                 
-                logger.info(f"Performing {len(representative_queries)} optimized searches (instead of per-chunk)")
+                logger.info(f"Performing {len(representative_queries)} strategic searches")
                 
-                for i, query in enumerate(representative_queries[:3]):  # Max 3 searches
+                for i, (query_type, query) in enumerate(representative_queries[:5]):  # Max 5 searches
                     try:
                         from app.services.pinecone_rag import combined_search
-                        logger.info(f"  Search {i+1}/{len(representative_queries)}: {len(query)} chars")
+                        logger.info(f"  Search {i+1}/{len(representative_queries)} ({query_type}): {len(query)} chars")
                         matches = await combined_search(
                             query_text=query,
                             index_name=index_name,
@@ -478,7 +505,7 @@ Use inline citations [1], [2], [3] to reference research sources.
                             if m and m.get("id"):
                                 aggregated_candidates.append(m)
                     except Exception as e:
-                        logger.warning(f"Search {i+1} failed: {e}")
+                        logger.warning(f"Search {i+1} ({query_type}) failed: {e}")
 
                 # Deduplicate by ID, keeping highest score
                 cand_map: Dict[str, Dict[str, Any]] = {}
