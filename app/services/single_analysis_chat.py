@@ -336,8 +336,18 @@ Uploaded Document Content:
                 top_n=top_k,
                 rerank=True
             )
-            candidates = matches[:top_k] if matches else []
+            # Normalize candidates to ensure they have rerank_score
+            candidates = []
+            for i, m in enumerate(matches[:top_k] if matches else []):
+                # Add default rerank_score if not present (use position-based score)
+                if isinstance(m, dict):
+                    if 'rerank_score' not in m and 'score' not in m:
+                        m['rerank_score'] = 1.0 - (i * 0.05)  # Decreasing score by position
+                    candidates.append(m)
             logger.info(f"  → Retrieved {len(candidates)} candidates via fallback")
+            if candidates:
+                scores = [c.get('rerank_score') or c.get('score') or 0 for c in candidates]
+                logger.info(f"  → Score range: {min(scores):.2f} - {max(scores):.2f}")
         except Exception as e:
             logger.warning(f"Fallback RAG search failed: {e}")
     else:
