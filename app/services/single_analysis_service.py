@@ -431,38 +431,54 @@ Use inline citations [1], [2], [3] to reference research sources.
             
             elif index_name:
                 # Pinecone configured but hybrid retrieval module not available
-                # Use legacy per-chunk retrieval
-                logger.info("Using legacy per-chunk retrieval (hybrid module unavailable)")
+                # Use OPTIMIZED single-query retrieval (NOT per-chunk - that's too slow!)
+                logger.info("Using optimized single-query retrieval")
                 
                 aggregated_candidates: List[Dict[str, Any]] = []
                 
+                # Build ONE representative query from all documents
+                # Instead of searching for every chunk (200+ searches), do MAX 3 searches
+                combined_summary = []
                 for fc in file_contents:
                     filename = fc.get("filename") or "file"
-                    content = fc.get("content", "")
-                    prefix = filename.replace(' ', '_').replace('.', '_')
-                    
-                    # Chunk the document (500 tokens, 50 overlap)
-                    chunks = self._chunk_text(content, chunk_tokens=500, overlap_tokens=50, prefix=prefix)
-                    logger.info(f"File '{filename}': {len(chunks)} chunks")
-                    
-                    for ch in chunks:
-                        q = ch.get("content", "")
-                        if not q.strip():
-                            continue
-                        try:
-                            from app.services.pinecone_rag import combined_search
-                            matches = await combined_search(
-                                query_text=q,
-                                index_name=index_name,
-                                top_k=20,
-                                top_n=50,
-                                rerank=False  # We'll do global rerank later
-                            )
-                            for m in matches:
-                                if m and m.get("id"):
-                                    aggregated_candidates.append(m)
-                        except Exception as e:
-                            logger.warning(f"Chunk search failed: {e}")
+                    content = fc.get("content", "")[:3000]  # First 3000 chars per file
+                    combined_summary.append(f"[{filename}]: {content[:1500]}")
+                
+                # Create representative queries (max 3)
+                representative_queries = []
+                
+                # Query 1: User's question if provided
+                if user_query:
+                    representative_queries.append(user_query)
+                
+                # Query 2: Combined file summary (first 2000 chars)
+                combined_text = "\n".join(combined_summary)[:2000]
+                if combined_text.strip():
+                    representative_queries.append(combined_text)
+                
+                # Query 3: Key terms from documents (if different from above)
+                if len(representative_queries) < 2 and combined_summary:
+                    # Use first file's intro
+                    representative_queries.append(combined_summary[0][:1000])
+                
+                logger.info(f"Performing {len(representative_queries)} optimized searches (instead of per-chunk)")
+                
+                for i, query in enumerate(representative_queries[:3]):  # Max 3 searches
+                    try:
+                        from app.services.pinecone_rag import combined_search
+                        logger.info(f"  Search {i+1}/{len(representative_queries)}: {len(query)} chars")
+                        matches = await combined_search(
+                            query_text=query,
+                            index_name=index_name,
+                            top_k=30,
+                            top_n=50,
+                            rerank=False
+                        )
+                        for m in matches:
+                            if m and m.get("id"):
+                                aggregated_candidates.append(m)
+                    except Exception as e:
+                        logger.warning(f"Search {i+1} failed: {e}")
 
                 # Deduplicate by ID, keeping highest score
                 cand_map: Dict[str, Dict[str, Any]] = {}
