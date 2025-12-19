@@ -336,8 +336,18 @@ Uploaded Document Content:
                 top_n=top_k,
                 rerank=True
             )
-            candidates = matches[:top_k] if matches else []
+            # Normalize candidates to ensure they have rerank_score
+            candidates = []
+            for i, m in enumerate(matches[:top_k] if matches else []):
+                # Add default rerank_score if not present (use position-based score)
+                if isinstance(m, dict):
+                    if 'rerank_score' not in m and 'score' not in m:
+                        m['rerank_score'] = 1.0 - (i * 0.05)  # Decreasing score by position
+                    candidates.append(m)
             logger.info(f"  → Retrieved {len(candidates)} candidates via fallback")
+            if candidates:
+                scores = [c.get('rerank_score') or c.get('score') or 0 for c in candidates]
+                logger.info(f"  → Score range: {min(scores):.2f} - {max(scores):.2f}")
         except Exception as e:
             logger.warning(f"Fallback RAG search failed: {e}")
     else:
@@ -348,8 +358,35 @@ Uploaded Document Content:
     # =========================================================
     logger.info("[4/4] Generating response...")
     
-    # Build enhanced system prompt
-    system_prompt = f"""You are an expert analysis assistant helping with follow-up questions about a previously completed {chat_type} analysis.
+    # Build enhanced system prompt - adjust based on whether user uploaded content
+    if uploaded_content:
+        # User uploaded content - focus on analyzing THEIR content
+        system_prompt = f"""You are an expert analysis assistant. The user has uploaded content and wants you to analyze it.
+
+## User's Uploaded Content
+
+The user has uploaded {len(uploaded_content)} file(s) in this message:
+{chr(10).join([f"- {c['filename']} ({c['type']}, {c['length']:,} chars)" for c in uploaded_content])}
+
+## Your Task
+
+1. **PRIMARY FOCUS**: Analyze the content the user uploaded in this message
+2. Extract key concepts, findings, and important information from their uploaded content
+3. If research citations are available and relevant, include them with [1], [2] format
+4. If no relevant research is found, still provide a thorough analysis of their content
+5. Be specific and reference actual text/data from their uploaded content
+
+## Previous Analysis Context (for reference)
+{_extract_key_findings(original_response, max_chars=1000)}
+
+## Uploaded Content to Analyze
+{uploaded_context}
+---
+
+Now analyze the user's uploaded content and answer their question: "{user_question}" """
+    else:
+        # No uploads - standard follow-up question
+        system_prompt = f"""You are an expert analysis assistant helping with follow-up questions about a previously completed {chat_type} analysis.
 
 ## Original Analysis Context
 
@@ -362,7 +399,6 @@ The analysis was {content_analysis.get('total_words', 'unknown')} words and cont
 
 1. Answer the user's follow-up question based on:
    - The original analysis findings (provided below)
-   - Any NEW content the user has uploaded in this message
    - Additional research evidence from the knowledge base
    - Your expertise in philanthropy and nonprofit evaluation
 
@@ -372,13 +408,11 @@ The analysis was {content_analysis.get('total_words', 'unknown')} words and cont
 
 3. Reference specific points from the original analysis when relevant.
 
-4. If the user uploaded new documents or images, analyze their content and relate it to the original analysis.
-
-5. Be conversational but thorough - this is a follow-up, not a full report.
+4. Be conversational but thorough - this is a follow-up, not a full report.
 
 ## Original Analysis Summary
 {_extract_key_findings(original_response)}
-{uploaded_context}
+
 ---
 
 Now answer the user's follow-up question with evidence-based insights."""
@@ -397,16 +431,24 @@ Now answer the user's follow-up question with evidence-based insights."""
                     "study_title": md.get("study_title") or "",
                     "full_citation": md.get("full_citation") or "",
                     "year": md.get("year") or "n.d.",
+                    "rerank_score": c.get("rerank_score") or c.get("score") or 0.8,  # Preserve score
                     "metadata": md
                 })
+            
+            # Don't enforce strict relevance if user uploaded their own content
+            # They're asking about THEIR document, not just searching for research
+            has_user_uploads = len(uploaded_content) > 0
             
             result = await generate_from_precomputed_candidates(
                 system_prompt=system_prompt,
                 user_query=user_question,
                 candidates=formatted_candidates,
                 max_tokens=max_tokens,
-                enforce_relevance=True  # Check relevance
+                enforce_relevance=not has_user_uploads  # Lenient when user uploads content
             )
+            
+            if has_user_uploads:
+                logger.info("  → Relevance check bypassed (user uploaded content)")
         except Exception as e:
             logger.warning(f"Generation from candidates failed: {e}, using fallback")
             # Use combined_query which includes uploaded content
