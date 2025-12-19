@@ -167,14 +167,14 @@ async def analyze_files_with_rag(
         
         citations = [
             Citation(
-                id=cit.get('id', idx),
-                chunk_id=cit.get('chunk_id', ''),
-                paper_id=cit.get('paper_id', ''),
-                filename=cit.get('filename', ''),
-                section=cit.get('section', ''),
-                domain=cit.get('domain', ''),
-                content=cit.get('content', ''),
-                distance=cit.get('distance', 0.0)
+                id=cit.get('id') if cit.get('id') is not None else idx,
+                chunk_id=cit.get('chunk_id') or '',
+                paper_id=cit.get('paper_id') or '',
+                filename=cit.get('filename') or '',
+                section=cit.get('section') or '',
+                domain=cit.get('domain') or '',
+                content=cit.get('content') or '',
+                distance=float(cit.get('distance') or 0.0)
             )
             for idx, cit in enumerate(result['citations'])
         ]
@@ -251,16 +251,16 @@ async def analyze_single_with_rag_text(
         
         citations = [
             Citation(
-                id=cit['id'],
-                chunk_id=cit['chunk_id'],
-                paper_id=cit['paper_id'],
-                filename=cit['filename'],
-                section=cit['section'],
-                domain=cit['domain'],
-                content=cit['content'],
-                distance=cit['distance']
+                id=cit.get('id') if cit.get('id') is not None else idx,
+                chunk_id=cit.get('chunk_id') or '',
+                paper_id=cit.get('paper_id') or '',
+                filename=cit.get('filename') or '',
+                section=cit.get('section') or '',
+                domain=cit.get('domain') or '',
+                content=cit.get('content') or '',
+                distance=float(cit.get('distance') or 0.0)
             )
-            for cit in result['citations']
+            for idx, cit in enumerate(result['citations'])
         ]
         
         return SingleAnalysisResponse(
