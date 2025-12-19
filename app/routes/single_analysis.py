@@ -411,6 +411,7 @@ async def enhanced_chat_with_analysis(
     request: Request,
     analysis_id: str = Form(..., description="ID of the analysis to chat about"),
     message: str = Form("", description="User's follow-up question or instruction"),
+    files: List[UploadFile] = File(default=[], description="Optional files to upload (PDF, DOCX, images)"),
     domain: Optional[str] = Form(None, description="Optional domain filter for research"),
     top_k: int = Form(5, description="Number of research sources to retrieve"),
     max_tokens: int = Form(2000, description="Maximum response length"),
@@ -473,16 +474,14 @@ async def enhanced_chat_with_analysis(
     logger.info("ENHANCED CHAT ENDPOINT V2")
     logger.info("=" * 60)
     
-    # Extract files from form
-    form = await request.form()
-    files_raw = form.getlist("files") or form.getlist("files[]")
-    
+    # Use declared files parameter, also check form for files[] format
     valid_files = []
-    if files_raw:
-        for f in files_raw:
+    
+    # First, use the declared files parameter
+    if files:
+        for f in files:
             if hasattr(f, 'filename') and hasattr(f, 'read'):
                 try:
-                    # Check if file has content
                     content = await f.read(10)
                     await f.seek(0)
                     if f.filename and f.filename.strip() != "" and len(content) > 0:
@@ -492,8 +491,22 @@ async def enhanced_chat_with_analysis(
                         logger.warning(f"  Skipping empty file: {f.filename}")
                 except Exception as e:
                     logger.error(f"  Error reading file: {e}")
-            elif isinstance(f, str):
-                logger.debug(f"  Skipping string placeholder: {f}")
+    
+    # Also check form for files[] format (for curl compatibility)
+    if not valid_files:
+        form = await request.form()
+        files_raw = form.getlist("files[]")
+        if files_raw:
+            for f in files_raw:
+                if hasattr(f, 'filename') and hasattr(f, 'read'):
+                    try:
+                        content = await f.read(10)
+                        await f.seek(0)
+                        if f.filename and f.filename.strip() != "" and len(content) > 0:
+                            valid_files.append(f)
+                            logger.info(f"  File accepted (from files[]): {f.filename}")
+                    except Exception as e:
+                        logger.error(f"  Error reading file: {e}")
     
     logger.info(f"Chat request - Analysis: {analysis_id}, Files: {len(valid_files)}, Message: {len(message)} chars")
     
@@ -574,6 +587,7 @@ async def enhanced_chat_with_analysis(
 async def standalone_chat(
     request: Request,
     message: str = Form("", description="User's question or instruction"),
+    files: List[UploadFile] = File(default=[], description="Optional files to upload (PDF, DOCX, images)"),
     domain: Optional[str] = Form(None, description="Optional domain filter for research"),
     top_k: int = Form(10, description="Number of research sources to retrieve"),
     max_tokens: int = Form(3000, description="Maximum response length"),
@@ -616,13 +630,12 @@ async def standalone_chat(
     logger.info("STANDALONE CHAT ENDPOINT")
     logger.info("=" * 60)
     
-    # Extract files from form
-    form = await request.form()
-    files_raw = form.getlist("files") or form.getlist("files[]")
-    
+    # Use declared files parameter, also check form for files[] format
     valid_files = []
-    if files_raw:
-        for f in files_raw:
+    
+    # First, use the declared files parameter
+    if files:
+        for f in files:
             if hasattr(f, 'filename') and hasattr(f, 'read'):
                 try:
                     content = await f.read(10)
@@ -632,6 +645,22 @@ async def standalone_chat(
                         logger.info(f"  File accepted: {f.filename}")
                 except Exception as e:
                     logger.error(f"  Error reading file: {e}")
+    
+    # Also check form for files[] format (for curl compatibility)
+    if not valid_files:
+        form = await request.form()
+        files_raw = form.getlist("files[]")
+        if files_raw:
+            for f in files_raw:
+                if hasattr(f, 'filename') and hasattr(f, 'read'):
+                    try:
+                        content = await f.read(10)
+                        await f.seek(0)
+                        if f.filename and f.filename.strip() != "" and len(content) > 0:
+                            valid_files.append(f)
+                            logger.info(f"  File accepted (from files[]): {f.filename}")
+                    except Exception as e:
+                        logger.error(f"  Error reading file: {e}")
     
     logger.info(f"Standalone chat - Files: {len(valid_files)}, Message: {len(message)} chars")
     
