@@ -611,8 +611,15 @@ async def rerank_results(
         
     except Exception as e:
         logger.error(f"Reranking failed: {e}")
-        # Fallback to original scores
-        sorted_candidates = sorted(candidates, key=lambda x: x.get("score", 0), reverse=True)
+        # Fallback to original scores - but set rerank_score so downstream code works
+        for i, c in enumerate(candidates):
+            # Use original score, or position-based score if missing
+            original_score = c.get("score", 0)
+            if original_score == 0:
+                original_score = 1.0 - (i * 0.02)  # Position-based fallback
+            c["rerank_score"] = original_score
+        sorted_candidates = sorted(candidates, key=lambda x: x.get("rerank_score", 0), reverse=True)
+        logger.info(f"Fallback reranking: top score={sorted_candidates[0].get('rerank_score', 0) if sorted_candidates else 0}")
         return sorted_candidates[:top_n]
 
 

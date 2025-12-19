@@ -1555,19 +1555,23 @@ def check_query_relevance(
             "recommendation": "No documents were retrieved from the database."
         }
     
-    # Extract scores from candidates
+    # Extract scores from candidates - handle 0 values explicitly
     scores = []
     for c in candidates:
-        # Try different score fields
-        score = (
-            c.get("rerank_score") or 
-            c.get("score") or 
-            c.get("distance") or 
-            0.0
-        )
+        # Try different score fields - don't use 'or' which treats 0 as falsy
+        score = c.get("rerank_score")
+        if score is None:
+            score = c.get("score")
+        if score is None:
+            score = c.get("distance")
+        if score is None:
+            score = 0.0
+        
         # Normalize if needed (some scores are 0-1, some might be higher)
         if isinstance(score, (int, float)):
             scores.append(float(score))
+    
+    logger.debug(f"Relevance check scores: {scores[:5]}")
     
     if not scores:
         scores = [0.0]

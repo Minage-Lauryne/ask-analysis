@@ -363,13 +363,19 @@ Uploaded Document Content:
     content_analysis_keywords = [
         "this file", "this document", "the above", "uploaded", "compare", 
         "similarity", "difference", "related to", "summarize this", "analyze this",
-        "what is this", "explain this", "in this document", "in this file"
+        "what is this", "explain this", "in this document", "in this file",
+        "above analysis", "previous analysis", "the analysis", "my document",
+        "my file", "what does this", "tell me about this"
     ]
-    is_content_analysis_query = any(kw in user_question.lower() for kw in content_analysis_keywords)
+    question_lower = user_question.lower()
+    is_content_analysis_query = any(kw in question_lower for kw in content_analysis_keywords)
     has_user_uploads = len(uploaded_content) > 0
     
+    logger.info(f"  → Content analysis check: has_uploads={has_user_uploads}, is_content_query={is_content_analysis_query}")
+    logger.info(f"  → Question keywords found: {[kw for kw in content_analysis_keywords if kw in question_lower]}")
+    
     if has_user_uploads and is_content_analysis_query:
-        logger.info("  → Content analysis query detected - analyzing user's uploaded content directly")
+        logger.info("  → DIRECT CONTENT ANALYSIS - Bypassing RAG (user asking about their uploaded content)")
         # Skip RAG entirely - just analyze the user's content
         return await _generate_direct_content_analysis(
             user_question=user_question,
@@ -445,10 +451,18 @@ Now answer the user's follow-up question with evidence-based insights."""
     # If we have candidates, use the precomputed generation
     if candidates and len(candidates) > 0:
         try:
-            # Format candidates for generation
+            # Format candidates for generation - PRESERVE SCORES PROPERLY
             formatted_candidates = []
-            for c in candidates:
+            for i, c in enumerate(candidates):
                 md = c.get("metadata", {}) if isinstance(c.get("metadata"), dict) else c
+                
+                # Get score - handle 0 values explicitly (don't use 'or' which treats 0 as falsy)
+                score = c.get("rerank_score")
+                if score is None or score == 0:
+                    score = c.get("score")
+                if score is None or score == 0:
+                    score = 0.9 - (i * 0.05)  # Position-based fallback (0.9, 0.85, 0.8, ...)
+                
                 formatted_candidates.append({
                     "id": c.get("id"),
                     "chunk_id": md.get("chunk_id") or c.get("id"),
@@ -456,9 +470,13 @@ Now answer the user's follow-up question with evidence-based insights."""
                     "study_title": md.get("study_title") or "",
                     "full_citation": md.get("full_citation") or "",
                     "year": md.get("year") or "n.d.",
-                    "rerank_score": c.get("rerank_score") or c.get("score") or 0.8,  # Preserve score
+                    "authors": md.get("authors") or md.get("author") or "",
+                    "rerank_score": float(score),  # Ensure it's a float
+                    "score": float(score),  # Also set score field for compatibility
                     "metadata": md
                 })
+            
+            logger.info(f"  → Formatted {len(formatted_candidates)} candidates, scores: {[c.get('rerank_score', 0) for c in formatted_candidates[:3]]}")
             
             # Don't enforce strict relevance if user uploaded their own content
             # They're asking about THEIR document, not just searching for research
@@ -517,7 +535,7 @@ async def _generate_direct_content_analysis(
     chat_type: str,
     analysis_id: str,
     file_metadata: List[Dict[str, Any]],
-    max_tokens: int = 3000
+    max_tokens: int = 4000
 ) -> Dict[str, Any]:
     """
     Generate a direct content analysis without RAG search.
@@ -530,34 +548,71 @@ async def _generate_direct_content_analysis(
     logger.info("=" * 60)
     logger.info("DIRECT CONTENT ANALYSIS (No RAG Required)")
     logger.info("=" * 60)
+    logger.info(f"  → User question: {user_question[:100]}...")
+    logger.info(f"  → Uploaded files: {[c['filename'] for c in uploaded_content]}")
     
-    # Build content from uploads
+    # Build content from uploads - include more content for better analysis
     uploaded_text = ""
     for i, content in enumerate(uploaded_content, 1):
-        uploaded_text += f"\n\n### Uploaded Document {i}: {content['filename']}\n"
-        uploaded_text += content['content'][:8000]  # Include substantial content
-        if len(content['content']) > 8000:
-            uploaded_text += "\n[... document continues ...]"
+        uploaded_text += f"\n\n### UPLOADED DOCUMENT {i}: {content['filename']}\n"
+        uploaded_text += "=" * 50 + "\n"
+        # Include more content (up to 15000 chars) for thorough analysis
+        doc_content = content['content'][:15000]
+        uploaded_text += doc_content
+        if len(content['content']) > 15000:
+            uploaded_text += f"\n\n[... document continues - total {len(content['content']):,} characters ...]"
     
-    # Build system prompt for direct analysis
-    system_prompt = f"""You are an expert document analyst. The user has uploaded a document and is asking a question about it.
+    # Determine if this is a comparison request
+    is_comparison = any(kw in user_question.lower() for kw in [
+        "compare", "comparison", "difference", "similar", "relate", 
+        "above analysis", "previous analysis", "the analysis"
+    ])
+    
+    if is_comparison:
+        system_prompt = f"""You are an expert document analyst performing a COMPARISON analysis.
 
-## Your Task
-Analyze the uploaded document and answer the user's question. Focus on:
-1. The actual content of the uploaded document
-2. How it relates to the previous analysis (if the user asks about comparison)
-3. Key findings, themes, and insights from the document
+## YOUR TASK
+The user has uploaded a new document and wants you to compare it with a previous analysis.
 
-## Previous Analysis Summary (for comparison if needed)
-{_extract_key_findings(original_response, max_chars=3000)}
+Provide a detailed comparison covering:
+1. **Key Similarities** - What themes, findings, or approaches are shared?
+2. **Key Differences** - Where do the documents diverge?
+3. **Complementary Insights** - How do the documents inform each other?
+4. **Synthesis** - What overall conclusions can be drawn from both?
 
-## Uploaded Document Content
+## PREVIOUS ANALYSIS (to compare against)
+{_extract_key_findings(original_response, max_chars=4000)}
+
+## NEW UPLOADED DOCUMENT
 {uploaded_text}
 
 ---
 
-**Important**: You are analyzing the USER'S document. No external research citations are needed.
-Provide a thorough, helpful analysis based on the document content above."""
+Provide a thorough, well-structured comparison. Use specific quotes and references from both documents.
+No external research citations are needed - focus on comparing the two documents."""
+
+    else:
+        system_prompt = f"""You are an expert document analyst.
+
+## YOUR TASK
+The user has uploaded a document and is asking a question about it.
+
+Provide a thorough analysis that:
+1. Directly answers the user's question
+2. Extracts key findings, themes, and insights from the document
+3. Highlights important data points, statistics, or conclusions
+4. Summarizes the document's main arguments or purpose
+
+## CONTEXT FROM PREVIOUS ANALYSIS (for reference)
+{_extract_key_findings(original_response, max_chars=2000)}
+
+## UPLOADED DOCUMENT TO ANALYZE
+{uploaded_text}
+
+---
+
+Provide a detailed, helpful analysis based on the document content above.
+No external research citations are needed - focus on the user's uploaded document."""
 
     user_msg = f"User Question: {user_question}"
     
@@ -576,23 +631,26 @@ Provide a thorough, helpful analysis based on the document content above."""
             "has_research": False,
             "num_sources": 0,
             "source": "direct_analysis",
-            "analysis_type": "content_comparison",
+            "analysis_type": "comparison" if is_comparison else "content_analysis",
             "original_analysis_type": chat_type,
             "original_analysis_id": analysis_id,
-            "files_analyzed": [f["filename"] for f in file_metadata],
+            "files_analyzed": [f.get("filename", "unknown") for f in file_metadata] if file_metadata else [],
             "is_follow_up": True,
             "uploaded_in_chat": [c["filename"] for c in uploaded_content],
             "uploaded_content_types": [c["type"] for c in uploaded_content],
-            "note": "This is a direct content analysis of your uploaded document. No external research citations were required."
+            "note": "Direct content analysis of your uploaded document. No external research citations required."
         }
         
     except Exception as e:
         logger.error(f"Direct content analysis failed: {e}")
+        import traceback
+        traceback.print_exc()
         return {
             "response": f"Analysis failed: {str(e)}. Please try again.",
             "citations": [],
             "has_research": False,
             "num_sources": 0,
+            "source": "error",
             "is_follow_up": True,
             "uploaded_in_chat": [c["filename"] for c in uploaded_content]
         }
