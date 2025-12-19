@@ -814,23 +814,33 @@ Use the provided RESEARCH CONTEXT to answer the USER QUERY.
 
 CRITICAL INSTRUCTIONS:
 1. **Data Density:** Extract specific statistics, percentages, ages, and sample sizes from the text. Do not generalize if specific numbers are available.
+
 2. **MANDATORY: Use APA 7 inline citation format**
-   - ONLY cite sources with author names using the format: Author, (Year)
-   - Example: Latessa et al., (2002)
-   - Multiple sources: Smith, (2020); Jones et al., (2019)
-   - Single Author: Smith, (2020)
-   - Two authors: Smith & Johnson, (2020)
-   - Multiple authors: Smith et al., (2020)
+   You can use EITHER narrative citations OR parenthetical citations:
+
+   **Narrative citations** (author as subject of sentence):
+   - "Katz et al. (2017) developed a prediction model achieving 70.2% accuracy."
+   - "Smith and Johnson (2020) demonstrated significant improvements."
+   - "According to Miller (2015), the treatment reduced recidivism by 45%."
+
+   **Parenthetical citations** (at end of statement):
+   - "The treatment reduced recidivism by 45% (Miller et al., 2015)."
+   - "Multiple studies confirm this approach (Smith, 2020; Jones et al., 2019)."
+
+   **Citation format rules:**
+   - Single author: Smith (2020) or (Smith, 2020)
+   - Two authors: Smith and Johnson (2020) or (Smith & Johnson, 2020)
+   - Three or more authors: Smith et al. (2020) or (Smith et al., 2020)
    - **If no author name is available, do NOT include inline citation at all**
    - Do NOT use brackets or numbers like [1] or [2, 2014]
-4. **Placement (Strict):** Citations must appear **ONLY at the very end of the sentence**, immediately before the period.
-   - ✅ CORRECT: "The treatment group showed a 12% reduction in recidivism (Miller et al., 2015)."
-   - ❌ WRONG (Mid-sentence): "The study (Miller et al., 2015) showed a reduction..."
-   - ❌ WRONG (Narrative): "Miller et al. (2015) states that the group showed..."
-   - **Correction Strategy:** If you want to say "Miller found X", rephrase it to "Research shows X (Miller, 2015)."
-5. **Citation Matching:** Ensure you are attributing information to the correct source from the context.
-6. **No Hallucinations:** If the answer is not in the context, state that you do not have enough information.
-7. **Formatting:** Use clear headings, bullet points, and bold text for key findings.
+
+3. **Citation Matching:** Ensure you are attributing information to the correct source from the context.
+4. **No Hallucinations:** If the answer is not in the context, state that you do not have enough information.
+5. **Formatting:** Use clear headings, bullet points, and bold text for key findings.
+
+<example>
+Classification techniques using AI have been explored extensively. The prediction model developed by Katz et al. (2017) employed statistical ensemble methods achieving 70.2% accuracy at the case outcome level. Sulea et al. (2017) explored using linear SVM classifiers, achieving an f1 score of 96% in predicting case rulings. Craigle (2019) identified diverse applications of AI in law including legal research platforms and chatbots.
+</example>
 
 Output Format:
 - Return a comprehensive analysis.
