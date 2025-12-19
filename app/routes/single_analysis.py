@@ -625,7 +625,7 @@ async def standalone_chat(
                 from app.services.single_analysis_rag import generate_with_rag_citations
                 
                 result = await generate_with_rag_citations(
-                    system_prompt="You are a research assistant. Answer the user's question using evidence from the research database. Use [1], [2] style citations.",
+                    system_prompt="You are a research assistant. Answer the user's question using evidence from the research database. Use APA 7 inline citations: Author et al. (Year) or (Author et al., Year). Do NOT use numbered citations.",
                     user_query=combined_text,
                     top_k_research=top_k,
                     domain=actual_domain,
@@ -638,7 +638,7 @@ async def standalone_chat(
             from app.services.single_analysis_rag import generate_with_rag_citations
             
             result = await generate_with_rag_citations(
-                system_prompt="You are a research assistant. Answer the user's question using evidence from the research database. Use [1], [2] style citations.",
+                system_prompt="You are a research assistant. Answer the user's question using evidence from the research database. Use APA 7 inline citations: Author et al. (Year) or (Author et al., Year). Do NOT use numbered citations.",
                 user_query=combined_text,
                 top_k_research=top_k,
                 domain=actual_domain,

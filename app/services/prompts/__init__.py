@@ -35,11 +35,14 @@ As you analyze, you maintain a structured mental checklist:
 
 Your communication style is clear and professional, but not distant. You organize information under clear headers and use bullet points for readability, but you maintain a conversational tone that invites dialogue.
 
-## Research Integration:
-- Use the provided research evidence with inline citations [1], [2], [3]
-- Cite specific claims that are supported by research
-- Combine multiple sources when appropriate: [1,2] or [1,2,3]
-- ALWAYS cite the authors of specific studies used in your analysis
+## Research Integration (APA 7 Inline Citations):
+- Use APA 7 inline citation format: Author et al. (Year) or (Author et al., Year)
+- Weave citations naturally into sentences:
+  - Narrative: "Katz et al. (2017) demonstrated that the model achieved 70.2% accuracy."
+  - Parenthetical: "The program showed significant impact (Miller et al., 2015)."
+- Multiple sources: (Smith, 2020; Jones et al., 2019)
+- Do NOT use numbered citations like [1], [2], [3]
+- Only cite sources that have author names in the research context
 - A references section will be automatically appended
 
 ## Constraints:
@@ -75,9 +78,10 @@ Use these categories to structure your analysis:
 ### 9. Power and Voice
 ### 10. Implications and Recommendations
 
-## Research Integration:
-- Use the provided research evidence with inline citations [1], [2], [3]
-- Cite studies that support your bias analysis
+## Research Integration (APA 7 Inline Citations):
+- Use APA 7 format: Author et al. (Year) or (Author et al., Year)
+- Weave citations naturally: "Smith et al. (2020) found..." or "...was effective (Smith et al., 2020)."
+- Do NOT use numbered citations like [1], [2], [3]
 - A references section will be automatically appended
 
 ## Constraints:
@@ -114,9 +118,10 @@ Reference specific research, case studies, failures, or lessons from the field.
 ### 5. Reflective Questions for Funders
 Pose 3–5 strategic questions designed to sharpen the funder's critical thinking.
 
-## Research Integration:
-- Use the provided research evidence with inline citations [1], [2], [3]
-- Cite studies that support your counterpoints
+## Research Integration (APA 7 Inline Citations):
+- Use APA 7 format: Author et al. (Year) or (Author et al., Year)
+- Weave citations naturally: "Smith et al. (2020) found..." or "...was effective (Smith et al., 2020)."
+- Do NOT use numbered citations like [1], [2], [3]
 - A references section will be automatically appended
 
 ## Constraints:
@@ -166,9 +171,10 @@ List all sources cited throughout the analysis with full links.
 **Follow-On Prompt**  
 End with: "Would you like to extend this analysis beyond the current region?"
 
-## Research Integration:
-- Use the provided research evidence with inline citations [1], [2], [3]
-- Cite studies that support your landscape mapping
+## Research Integration (APA 7 Inline Citations):
+- Use APA 7 format: Author et al. (Year) or (Author et al., Year)
+- Weave citations naturally: "Smith et al. (2020) found..." or "...was effective (Smith et al., 2020)."
+- Do NOT use numbered citations like [1], [2], [3]
 - A references section will be automatically appended
 
 ## Constraints:
@@ -208,9 +214,10 @@ One paragraph final assessment with clear funding recommendation.
 - Keep total length to maximum 2 pages
 - Start directly with analysis, no conversational opening
 
-## Research Integration:
-- Use the provided research evidence with inline citations [1], [2], [3]
-- Cite key research that supports your summary
+## Research Integration (APA 7 Inline Citations):
+- Use APA 7 format: Author et al. (Year) or (Author et al., Year)
+- Weave citations naturally: "Smith et al. (2020) found..." or "...was effective (Smith et al., 2020)."
+- Do NOT use numbered citations like [1], [2], [3]
 - A references section will be automatically appended
 
 ## Output Format:
@@ -261,9 +268,10 @@ Key questions or areas of uncertainty warranting observation over time.
 - Identify **data gaps** and describe their impact
 - Write in **succinct, readable paragraphs** with **bulleted points** for clarity
 
-## Research Integration:
-- Use the provided research evidence with inline citations [1], [2], [3]
-- Cite studies that support your analysis
+## Research Integration (APA 7 Inline Citations):
+- Use APA 7 format: Author et al. (Year) or (Author et al., Year)
+- Weave citations naturally: "Smith et al. (2020) found..." or "...was effective (Smith et al., 2020)."
+- Do NOT use numbered citations like [1], [2], [3]
 - A references section will be automatically appended
 
 ## Output Format:

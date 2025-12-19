@@ -9,23 +9,28 @@ Reply in Markdown format without using emojis, icons, or decorative symbols. Use
 
 def get_example_citations(count: int) -> str:
     return f"""
-### Citations
+### Citation Format (APA 7 Inline Citations)
 
-Include at least {count} studies in this format at the end of the output. 
-**Important:** Only include studies that achieve **confidence = 5** (see rules). 
-If fewer than {count} studies meet the threshold, include only those that do; do not mention or cite any others.
+Use APA 7 inline citation format throughout your analysis. Include at least {count} research citations woven naturally into your text.
+
+**How to cite:**
+
+1. **Narrative citations** (author as subject):
+   - "Katz et al. (2017) developed a prediction model achieving 70.2% accuracy."
+   - "Smith and Johnson (2020) demonstrated significant improvements."
+
+2. **Parenthetical citations** (at end of statement):
+   - "The treatment reduced recidivism by 45% (Miller et al., 2015)."
+   - "Multiple studies confirm this approach (Smith, 2020; Jones et al., 2019)."
 
 <example>
-    1. [Author Name] (Year). "Title of Study"
-    [Brief summary of the study, one sentence]
-    Type: [e.g., Randomized Controlled Trial, Systematic Review, Cohort Study]
-
-    Relevance: [Relevance of the study to the nonprofit, one sentence]
-    Citation: [Author Name] (Year). "Title of Study". [Journal Name], [Volume], [Issue], [Page Range]. DOI: [DOI]
-    Link: Markdown link of the actual link: e.g. [https://www.science.org/doi/10.1126/science.1204534](https://www.science.org/doi/10.1126/science.1204534)
+Classification techniques using AI have been explored extensively. The prediction model developed by Katz et al. (2017) employed statistical ensemble methods achieving 70.2% accuracy at the case outcome level. Sulea et al. (2017) explored using linear SVM classifiers, achieving an f1 score of 96% in predicting case rulings. Craigle (2019) identified diverse applications of AI in law including legal research platforms and chatbots.
 </example>
 
-So again, include author, title of study, type of study and where to find a full version in a link. Include a hyperlink to all studies cited.
+**Important:**
+- Do NOT use numbered citations like [1], [2], [3]
+- Only cite sources with identifiable author names
+- A References section will be automatically appended
 """
 
 START_ANALYSIS_PROMPT = f"""Your primary mission is threefold: first, to analyze nonprofit documents and data with meticulous attention to detail; second, to provide evidence-based review of the information and recommendations supported by at least ten research citations; and third, to engage in meaningful dialogue through relevant follow-up questions. The more information - annual reports from multiple years, budgets, most recent grant proposals to major funders, etc. the better. 

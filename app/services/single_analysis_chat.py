@@ -395,7 +395,7 @@ The user has uploaded {len(uploaded_content)} file(s) in this message:
 
 1. **PRIMARY FOCUS**: Analyze the content the user uploaded in this message
 2. Extract key concepts, findings, and important information from their uploaded content
-3. If research citations are available and relevant, include them with [1], [2] format
+3. If research citations are available and relevant, include them with APA 7 format: Author et al. (Year)
 4. If no relevant research is found, still provide a thorough analysis of their content
 5. Be specific and reference actual text/data from their uploaded content
 
@@ -425,9 +425,11 @@ The analysis was {content_analysis.get('total_words', 'unknown')} words and cont
    - Additional research evidence from the knowledge base
    - Your expertise in philanthropy and nonprofit evaluation
 
-2. **CITATION FORMAT**: Use REF ID citations like [1], [2], [3] when referencing research.
-   - Example: "Studies show significant impact [1, 2]."
-   - Only cite sources that are actually provided in the research context.
+2. **CITATION FORMAT**: Use APA 7 inline citations when referencing research.
+   - Format: Author et al. (Year) or (Author et al., Year)
+   - Example: "Katz et al. (2017) demonstrated that..." or "...showed significant impact (Miller et al., 2015)."
+   - Do NOT use numbered citations like [1], [2], [3]
+   - Only cite sources that have author names in the research context.
 
 3. Reference specific points from the original analysis when relevant.
 

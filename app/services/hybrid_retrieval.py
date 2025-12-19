@@ -28,7 +28,7 @@ This module handles:
 5. Hybrid search (dense + sparse)
 6. Result combination
 7. Reranking
-8. Citation formatting with REF ID [1], [2], etc.
+8. Citation formatting with APA 7: Author et al. (Year)
 """
 
 import os
@@ -258,7 +258,7 @@ Document to chunk:
 
             def _call_llm():
                 return anthropic_client.messages.create(
-                    model="claude-3-5-sonnet-20241022",
+                    model="claude-sonnet-4-20250514",
                     max_tokens=8000,
                     temperature=0,
                     messages=[{"role": "user", "content": prompt}]
@@ -267,7 +267,6 @@ Document to chunk:
             response = await asyncio.to_thread(_call_llm)
             raw_text = response.content[0].text.strip()
             
-            # Remove markdown code blocks if present
             if raw_text.startswith("```"):
                 parts = raw_text.split("```")
                 if len(parts) >= 2:
@@ -277,7 +276,6 @@ Document to chunk:
             
             chunks_data = json.loads(raw_text)
             
-            # Normalize to our format
             chunks = []
             for i, item in enumerate(chunks_data, start=1):
                 content = item.get("content", "") if isinstance(item, dict) else str(item)
@@ -296,13 +294,9 @@ Document to chunk:
         except Exception as e:
             logger.warning(f"LLM chunking failed: {e}, falling back to fixed-size")
     
-    # Fallback to fixed-size chunking
     return chunk_text(text, chunk_tokens, overlap_tokens, prefix="doc_chunk")
 
-
-# =========================================================
 # STEP 2: EMBEDDINGS (Dense + Sparse)
-# =========================================================
 
 async def generate_dense_embedding(
     text: str,
@@ -538,7 +532,7 @@ async def rerank_results(
     query: str,
     candidates: List[Dict[str, Any]],
     top_n: int = 10,
-    model: str = "claude-3-5-sonnet-20241022"
+    model: str = "claude-sonnet-4-20250514"
 ) -> List[Dict[str, Any]]:
     """
     Rerank candidates using Anthropic LLM to score relevance.
@@ -690,7 +684,7 @@ def format_apa_citation(metadata: Dict[str, Any]) -> str:
 
 def build_numbered_context(
     matches: List[Dict[str, Any]],
-    max_content_chars: int = 2000
+    max_content_chars: int = 10000
 ) -> Tuple[str, List[Dict[str, Any]]]:
     """
     Build numbered research context with REF ID citations.
@@ -725,7 +719,23 @@ def build_numbered_context(
             "Untitled Document"
         )
         
-        # Format citation
+        # Extract authors for inline citation
+        authors = (
+            md.get("authors") or 
+            md.get("author") or 
+            md.get("Author") or
+            ""
+        )
+        
+        # Extract year
+        year = (
+            md.get("year") or 
+            md.get("Year") or 
+            md.get("Year ") or
+            "n.d."
+        )
+        
+        # Format full citation
         citation = format_apa_citation(md)
         
         # Get link
@@ -737,9 +747,11 @@ def build_numbered_context(
             ""
         )
         
-        # Build context block
+        # Build context block with author info for inline citations
         block = (
             f"### REF ID [{idx}]\n"
+            f"AUTHORS: {authors}\n"
+            f"YEAR: {year}\n"
             f"TITLE: {title}\n"
             f"FULL CITATION: {citation}\n"
             f"LINK: {link}\n"
@@ -751,6 +763,8 @@ def build_numbered_context(
         citations.append({
             "ref_id": idx,
             "id": m.get("id"),
+            "authors": authors,
+            "year": year,
             "title": title,
             "full_citation": citation,
             "link": link,
@@ -774,7 +788,7 @@ async def generate_analysis(
     context: str,
     system_prompt: Optional[str] = None,
     max_tokens: int = 4000,
-    model: str = "claude-3-5-sonnet-20241022"
+    model: str = "claude-sonnet-4-20250514"
 ) -> Dict[str, Any]:
     """
     Generate final analysis using LLM with research context.
@@ -800,11 +814,29 @@ Use the provided RESEARCH CONTEXT to answer the USER QUERY.
 
 CRITICAL INSTRUCTIONS:
 1. **Data Density:** Extract specific statistics, percentages, ages, and sample sizes from the text. Do not generalize if specific numbers are available.
-2. **Inline Citations:** The context provides studies labeled as REF ID [1], [2], etc.
-   - When you state a fact, IMMEDIATELY reference the study ID in brackets: "Educational engagement was high (95%) [1]."
-3. **Citation Matching:** Reference the REF IDs in your response when using information from those sources.
+2. **MANDATORY: Use APA 7 inline citation format**
+   - ONLY cite sources with author names using the format: Author, (Year)
+   - Example: Latessa et al., (2002)
+   - Multiple sources: Smith, (2020); Jones et al., (2019)
+   - Single Author: Smith, (2020)
+   - Two authors: Smith & Johnson, (2020)
+   - Multiple authors: Smith et al., (2020)
+   - **If no author name is available, do NOT include inline citation at all**
+   - Do NOT use brackets or numbers like [1] or [2, 2014]
+4. **Placement (Strict):** Citations must appear **ONLY at the very end of the sentence**, immediately before the period.
+   - ✅ CORRECT: "The treatment group showed a 12% reduction in recidivism (Miller et al., 2015)."
+   - ❌ WRONG (Mid-sentence): "The study (Miller et al., 2015) showed a reduction..."
+   - ❌ WRONG (Narrative): "Miller et al. (2015) states that the group showed..."
+   - **Correction Strategy:** If you want to say "Miller found X", rephrase it to "Research shows X (Miller, 2015)."
+5. **Citation Matching:** Ensure you are attributing information to the correct source from the context.
+6. **No Hallucinations:** If the answer is not in the context, state that you do not have enough information.
+7. **Formatting:** Use clear headings, bullet points, and bold text for key findings.
 
-Format your response with clear sections and include inline citations [1], [2], etc."""
+Output Format:
+- Return a comprehensive analysis.
+- Do NOT generate a "References" section at the end (this is handled automatically).
+- Focus on the content and inline citations.
+"""
 
     final_system = system_prompt or default_system
     

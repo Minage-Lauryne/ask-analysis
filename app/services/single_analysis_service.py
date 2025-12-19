@@ -308,7 +308,7 @@ The user has uploaded documents and asked the following specific question:
 "{user_query}"
 
 Focus your analysis on answering this question using the documents provided and relevant research evidence.
-Use inline citations [1], [2], [3] to reference research sources.
+Use APA 7 inline citations: Author et al. (Year) or (Author et al., Year).
 """
                     system_prompt = query_instruction + "\n\n" + system_prompt
                 
@@ -792,10 +792,11 @@ Stay focused on providing practical, actionable insights supported by research, 
 
 {file_context}
 
-## Research Integration:
-- Use the provided research evidence with inline citations [1], [2], [3]
-- Cite specific claims that are supported by research
-- Combine multiple sources when appropriate: [1,2] or [1,2,3]
+## Research Integration (APA 7 Inline Citations):
+- Use APA 7 format: Author et al. (Year) or (Author et al., Year)
+- Weave citations naturally: "Smith et al. (2020) found..." or "...was effective (Smith et al., 2020)."
+- Multiple sources: (Smith, 2020; Jones et al., 2019)
+- Do NOT use numbered citations like [1], [2], [3]
 - ALWAYS cite the authors of specific studies used in your analysis
 - A references section will be automatically appended
 
@@ -908,13 +909,14 @@ Focus your deepest analysis where the bias could affect **real-world outcomes**â
 
 {file_context}
 
-## Research Integration:
-- Use the provided research evidence with inline citations [1], [2], [3]  
+## Research Integration (APA 7 Inline Citations):
+- Use APA 7 format: Author et al. (Year) or (Author et al., Year)
 - Cite studies that support your bias analysis
+- Do NOT use numbered citations like [1], [2], [3]
 - A references section will be automatically appended
 
-## Example Citation Format:
-Research on implicit bias in grantmaking demonstrates disparate outcomes for organizations led by people of color [1]. Studies show that deficit-based language reinforces stereotypes [2], while asset-framing improves community engagement [3]. Geographic disparities in funding allocation are well-documented [4], and intersectional analysis reveals compounded barriers [5].
+## Example Citation Format (APA 7):
+Research on implicit bias in grantmaking demonstrates disparate outcomes for organizations led by people of color (Smith et al., 2020). Studies show that deficit-based language reinforces stereotypes (Johnson & Williams, 2019), while asset-framing improves community engagement (Chen et al., 2021). Geographic disparities in funding allocation are well-documented (Latessa et al., 2018), and intersectional analysis reveals compounded barriers (Miller, 2022).
 
 ## Constraints:
 
@@ -1019,9 +1021,10 @@ Use this prompt to evaluate:
 
 {file_context}
 
-## Research Integration:
-- Use the provided research evidence with inline citations [1], [2], [3]
+## Research Integration (APA 7 Inline Citations):
+- Use APA 7 format: Author et al. (Year) or (Author et al., Year)
 - Cite studies that support your counterpoints
+- Do NOT use numbered citations like [1], [2], [3]
 - A references section will be automatically appended
 
 ## Example Citation Format:
@@ -1153,9 +1156,10 @@ This helps shape the initial landscape analysis and reduces the need for follow-
 
 {file_context}
 
-## Research Integration:
-- Use the provided research evidence with inline citations [1], [2], [3]
+## Research Integration (APA 7 Inline Citations):
+- Use APA 7 format: Author et al. (Year) or (Author et al., Year)
 - Cite studies that support your landscape mapping
+- Do NOT use numbered citations like [1], [2], [3]
 - A references section will be automatically appended
 
 ## Example Citation Format:
@@ -1212,9 +1216,10 @@ One paragraph final assessment with clear funding recommendation (recommend, rec
 
 {file_context}
 
-## Research Integration:
-- Use the provided research evidence with inline citations [1], [2], [3]
+## Research Integration (APA 7 Inline Citations):
+- Use APA 7 format: Author et al. (Year) or (Author et al., Year)
 - Cite key research that supports your summary
+- Do NOT use numbered citations like [1], [2], [3]
 - A references section will be automatically appended
 
 ## Output Format:
@@ -1365,9 +1370,10 @@ Outline key questions or areas of uncertainty that warrant observation or inquir
 
 {file_context}
 
-## Research Integration:
-- Use the provided research evidence with inline citations [1], [2], [3]
+## Research Integration (APA 7 Inline Citations):
+- Use APA 7 format: Author et al. (Year) or (Author et al., Year)
 - Cite studies that support your analysis
+- Do NOT use numbered citations like [1], [2], [3]
 - A references section will be automatically appended
 
 ## Output Format:

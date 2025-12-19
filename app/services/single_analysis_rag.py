@@ -985,13 +985,19 @@ class CitationManager:
         return citation_id
     
     def format_reference_section(self) -> str:
-        """Generate APA 7 style reference section with numbered list"""
+        """Generate APA 7 style reference section (alphabetical, no numbers)"""
         if not self.citations:
             return ""
         
         lines = ["\n\n## References\n"]
         
-        for citation in sorted(self.citations, key=lambda x: x['id']):
+        # Sort by author name (APA 7 style)
+        sorted_citations = sorted(
+            self.citations, 
+            key=lambda x: (x.get('author', 'ZZZ').lower(), x.get('year', '9999'))
+        )
+        
+        for citation in sorted_citations:
             if citation['source_type'] == 'research':
                 author = citation.get('author', '')
                 year = citation.get('year', 'n.d.')
@@ -1009,20 +1015,15 @@ class CitationManager:
                     title = title[:197].rsplit(' ', 1)[0] + "..."
                 
                 if author and author != 'Unknown Author':
-                    if 'et al' in author.lower():
-                        author_part = f"{author}"
-                    else:
-                        author_part = f"{author}"
-                    
                     if pdf_url:
-                        ref_line = f"{citation['id']}. {author_part} ({year}). {title}. {pdf_url}"
+                        ref_line = f"- {author} ({year}). *{title}*. Retrieved from {pdf_url}"
                     else:
-                        ref_line = f"{citation['id']}. {author_part} ({year}). {title}."
+                        ref_line = f"- {author} ({year}). *{title}*."
                 else:
                     if pdf_url:
-                        ref_line = f"{citation['id']}. {title}. ({year}). {pdf_url}"
+                        ref_line = f"- *{title}*. ({year}). Retrieved from {pdf_url}"
                     else:
-                        ref_line = f"{citation['id']}. {title}. ({year})."
+                        ref_line = f"- *{title}*. ({year})."
                 
                 lines.append(ref_line)
             else:  
@@ -1039,9 +1040,9 @@ class CitationManager:
                 clean_title = clean_title.strip()
                 
                 if author and author != 'Unknown':
-                    ref_line = f"{citation['id']}. {author}. ({year}). {clean_title}. {url}"
+                    ref_line = f"- {author}. ({year}). *{clean_title}*. Retrieved from {url}"
                 else:
-                    ref_line = f"{citation['id']}. {clean_title}. ({year}). {url}"
+                    ref_line = f"- *{clean_title}*. ({year}). Retrieved from {url}"
                 
                 lines.append(ref_line)
         
@@ -1363,47 +1364,48 @@ async def generate_with_rag_citations(
 
 {rag_result['context']}
 
-## CITATION FORMAT REQUIREMENTS (MANDATORY)
+## CITATION FORMAT REQUIREMENTS (APA 7 Inline Citations - MANDATORY)
 
-You MUST use the following APA 7 inline citation format throughout your response:
+**CRITICAL: Use APA 7 inline citation format throughout your response.**
 
 **Required Format:**
-- **ONLY cite sources that have an author or organization name** shown in the citation headers above
-- Use parentheses (NOT brackets) with author/organization and year: (Author Name, Year)
-- Do NOT include citation numbers in the text
-- Include citations for BOTH research papers AND web sources if they have identifiable authors/organizations
-- If a source has NO author/organization name in the header, do NOT cite it inline
+- Weave citations naturally into your writing using author names and years
+- Do NOT use numbered citations like [1], [2], [3]
+- Only cite sources that have identifiable author names
 
-**Correct Format:**
-✓ "Legal aid programs show significant economic impact (Latessa et al., 2002)."
-✓ "Pro bono services are vital (Erin N., 2025)."
-✓ "Multiple studies confirm effectiveness (Smith, 2020; Jones et al., 2019; Pratik P., 2025)."
-✓ "Access to justice remains challenging (RSI S., 2025; CyberCrest T., 2023)."
+**Citation Styles:**
 
-**Incorrect Formats:**
-✗ "Legal aid programs show impact [1, Latessa et al., 2002]." (No brackets/numbers)
-✗ "Programs are effective [1, 2014]." (No author = don't cite inline)
-✗ "Studies show results [4]." (No author = don't cite inline)
+1. **Narrative citations** (author as part of sentence):
+   - Single author: "Smith (2020) found that..."
+   - Two authors: "Smith and Johnson (2020) demonstrated..."
+   - 3+ authors: "Katz et al. (2017) achieved 70.2% accuracy..."
+
+2. **Parenthetical citations** (at end of claim):
+   - Single author: "...showed significant impact (Smith, 2020)."
+   - Two authors: "...was effective (Smith & Johnson, 2020)."
+   - 3+ authors: "...reduced recidivism rates (Miller et al., 2015)."
+   - Multiple sources: "...confirmed by research (Smith, 2020; Jones et al., 2019)."
+
+**Correct Examples:**
+✅ "The prediction model developed by Katz et al. (2017) employed statistical ensemble methods achieving 70.2% accuracy."
+✅ "Sulea et al. (2017) explored using linear SVM classifiers, achieving an f1 score of 96%."
+✅ "Research demonstrates significant improvements in outcomes (Latessa et al., 2002)."
+✅ "Multiple studies confirm program effectiveness (Smith, 2020; Miller et al., 2015)."
+
+**Incorrect Examples:**
+❌ "Studies show impact [1]." (No numbered citations)
+❌ "Research confirms [1, 2, 3]." (No brackets)
+❌ "[Smith et al., 2020] found..." (Don't start with brackets)
 
 **Important Rules:**
-1. Copy author/organization names EXACTLY as shown in citation headers
-2. Use comma between author and year: (Author, Year)
-3. For multiple sources, use semicolons: (Author1, 2020; Author2, 2019)
-4. Include web sources with their author names (e.g., Erin N., 2025; Pratik P., 2025)
-5. If citation header shows only [1, 2014] with no name, skip it - don't cite inline
-6. Use "n.d." for "no date" when year is not available
+1. Extract author names from the research context provided
+2. If no author name is available for a source, do NOT cite it inline
+3. Use "n.d." only when year is explicitly unavailable
+4. Match citations to actual sources in the context
 
-**What to do with sources without authors:**
-- You can still reference the information in your analysis
-- Just don't include an inline citation for them
-- They will still appear in the References section at the end
+**DO NOT generate a References section** - it will be automatically appended.
 
-**CRITICAL: DO NOT GENERATE YOUR OWN REFERENCES SECTION**
-- Do NOT create a "## References" or "References" section in your response
-- The references will be automatically appended to your response
-- Only write the analysis content with inline citations
-
-**Write a COMPREHENSIVE and DETAILED analysis** - aim for thorough examination of all aspects with specific examples and deep insights.
+**Write a COMPREHENSIVE and DETAILED analysis** with specific data points and thorough examination.
 
 Now proceed with your analysis using the evidence provided.
 """
@@ -1751,12 +1753,14 @@ def build_numbered_ref_context(
     max_content_chars: int = 2000
 ) -> Tuple[str, List[Dict[str, Any]]]:
     """
-    Build numbered research context with REF ID citations.
+    Build research context with author/year information for APA 7 citations.
     
     Format:
-    ### REF ID [1]
+    ### SOURCE [1]
+    AUTHORS: Smith et al.
+    YEAR: 2020
     TITLE: Study Title
-    FULL CITATION: Author et al. (Year). Title. Journal.
+    FULL CITATION: Smith, J., Jones, K., & Brown, M. (2020). Title. Journal.
     LINK: http://...
     CONTENT EXCERPTS:
     text content here
@@ -1811,9 +1815,29 @@ def build_numbered_ref_context(
             ""
         )
         
-        # Build REF ID context block
+        # Extract authors for APA citation
+        authors = (
+            md.get("authors") or 
+            md.get("author") or 
+            md.get("Author") or
+            c.get("author") or
+            ""
+        )
+        
+        # Extract year
+        year = (
+            md.get("year") or 
+            md.get("Year") or 
+            md.get("Year ") or
+            c.get("year") or
+            "n.d."
+        )
+        
+        # Build context block with prominent author/year for APA citations
         block = (
-            f"### REF ID [{idx}]\n"
+            f"### SOURCE [{idx}]\n"
+            f"AUTHORS: {authors}\n"
+            f"YEAR: {year}\n"
             f"TITLE: {title}\n"
             f"FULL CITATION: {citation}\n"
             f"LINK: {link}\n"
@@ -1854,10 +1878,10 @@ async def generate_from_precomputed_candidates(
     """
     Generate the final response given precomputed candidate matches using REF ID format.
     
-    This uses the numbered REF ID citation system:
-    - Context shows REF ID [1], [2], [3] with full citations
-    - LLM is instructed to use inline citations like [1], [2]
-    - References section lists all sources
+    This uses the APA 7 inline citation system:
+    - Context shows sources with author names and years
+    - LLM is instructed to use APA 7 format: Author et al. (Year)
+    - References section lists all sources alphabetically
     
     IMPORTANT: This function now includes a relevance check to prevent
     forcing irrelevant citations when the database doesn't contain
@@ -1926,23 +1950,39 @@ async def generate_from_precomputed_candidates(
     # Build numbered context with REF ID format
     numbered_context, citations_data = build_numbered_ref_context(unique_candidates)
 
-    # Enhanced system prompt with REF ID citation instructions
+    # Enhanced system prompt with APA 7 citation instructions
     ref_id_instructions = """
-## CITATION FORMAT REQUIREMENTS (REF ID System)
+## CITATION FORMAT REQUIREMENTS (APA 7 Inline Citations)
 
-The research context below provides studies labeled as REF ID [1], [2], etc.
+The research context below provides studies with author names and years.
 
 **CRITICAL INSTRUCTIONS:**
+
 1. **Data Density:** Extract specific statistics, percentages, ages, and sample sizes from the text. Do not generalize if specific numbers are available.
 
-2. **Inline Citations:** When you state a fact from the research, IMMEDIATELY reference the REF ID in brackets:
-   - Example: "Educational engagement was high (95%) [1]."
-   - Example: "The program showed significant outcomes [2, 3]."
-   - Example: "Multiple studies confirm effectiveness [1, 4, 5]."
+2. **MANDATORY: Use APA 7 inline citation format**
+   - ONLY cite sources with author names using the format: Author et al. (Year) or (Author et al., Year)
+   - Single Author: Smith (2020) found that... OR ...was effective (Smith, 2020).
+   - Two authors: Smith and Johnson (2020) OR (Smith & Johnson, 2020)
+   - Multiple authors: Smith et al. (2020) OR (Smith et al., 2020)
+   - Multiple sources: (Smith, 2020; Jones et al., 2019)
+   - **If no author name is available, do NOT include inline citation**
+   - Do NOT use brackets with numbers like [1] or [2]
 
-3. **Citation Matching:** Only cite REF IDs that appear in the research context below.
+3. **Natural Integration:** Weave citations naturally into sentences:
+   - ✅ CORRECT: "The prediction model developed by Katz et al. (2017) achieved 70.2% accuracy at the case outcome level."
+   - ✅ CORRECT: "Research demonstrates significant improvements in recidivism rates (Miller et al., 2015)."
+   - ✅ CORRECT: "Sulea et al. (2017) explored using linear SVM classifiers, achieving an f1 score of 96%."
+   - ❌ WRONG: "The study [1] showed results..."
+   - ❌ WRONG: "Research shows impact [2, 3]."
 
-4. **Do NOT generate your own References section** - it will be automatically appended.
+4. **Citation Placement:** Citations can appear mid-sentence when introducing authors, or at sentence end in parentheses:
+   - Narrative: "Latessa et al. (2002) demonstrated that..."
+   - Parenthetical: "...showed significant outcomes (Latessa et al., 2002)."
+
+5. **Citation Matching:** Only cite sources that have author information in the research context.
+
+6. **Do NOT generate a References section** - it will be automatically appended.
 
 """
 
@@ -1956,7 +1996,7 @@ The research context below provides studies labeled as REF ID [1], [2], etc.
 
 ---
 
-Now provide your analysis using the evidence above with inline citations [1], [2], etc.
+Now provide your analysis using APA 7 inline citations (Author et al., Year).
 """
 
     logger.info("Generating AI response with REF ID context...")
@@ -1977,17 +2017,16 @@ Now provide your analysis using the evidence above with inline citations [1], [2
             'source': 'research'
         }
 
-    # Build references section with REF IDs
+    # Build references section in APA 7 format (no numbered IDs)
     ref_lines = ["\n\n## References\n"]
     for cit in citations_data:
-        ref_id = cit.get("ref_id", "")
         full_citation = cit.get("full_citation", "")
         link = cit.get("link", "")
         
         if link:
-            ref_lines.append(f"[{ref_id}] {full_citation} {link}")
+            ref_lines.append(f"- {full_citation} Retrieved from {link}")
         else:
-            ref_lines.append(f"[{ref_id}] {full_citation}")
+            ref_lines.append(f"- {full_citation}")
     
     ref_section = "\n".join(ref_lines)
     final_response = raw_response + ref_section
