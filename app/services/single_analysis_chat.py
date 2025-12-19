@@ -268,14 +268,22 @@ async def generate_single_analysis_chat_response(
     
     # Combine user question with uploaded content for RAG search
     if uploaded_content:
-        combined_query = f"""
-User Question: {user_question}
+        # Include substantial content from uploads for better RAG search
+        content_excerpts = []
+        for c in uploaded_content:
+            excerpt = c['content'][:2000]  # Use more content for better context
+            content_excerpts.append(f"[{c['filename']}]: {excerpt}")
+        
+        combined_query = f"""User Question: {user_question}
 
-Context from uploaded content:
-{' '.join([c['content'][:500] for c in uploaded_content])}
+Uploaded Document Content:
+{chr(10).join(content_excerpts)}
 """
+        logger.info(f"  → Combined query includes {len(uploaded_content)} document(s)")
+        logger.info(f"  → Total combined query length: {len(combined_query)} chars")
     else:
         combined_query = user_question
+        logger.info(f"  → Query length: {len(combined_query)} chars (no uploads)")
     
     # =========================================================
     # STEP 3: Hybrid RAG Search (if enabled)
@@ -401,19 +409,21 @@ Now answer the user's follow-up question with evidence-based insights."""
             )
         except Exception as e:
             logger.warning(f"Generation from candidates failed: {e}, using fallback")
+            # Use combined_query which includes uploaded content
             result = await generate_with_rag_citations(
                 system_prompt=system_prompt,
-                user_query=user_question,
+                user_query=combined_query,  # Use combined_query with uploaded content!
                 top_k_research=top_k,
                 domain=domain,
                 max_tokens=max_tokens,
                 enable_web_fallback=False
             )
     else:
-        # Use standard RAG generation
+        # Use standard RAG generation with combined_query
+        logger.info(f"Using standard RAG with query length: {len(combined_query)} chars")
         result = await generate_with_rag_citations(
             system_prompt=system_prompt,
-            user_query=user_question,
+            user_query=combined_query,  # Use combined_query with uploaded content!
             top_k_research=top_k,
             domain=domain,
             max_tokens=max_tokens,
