@@ -1503,6 +1503,249 @@ def format_apa_citation_from_metadata(metadata: Dict[str, Any]) -> str:
     return ". ".join([p for p in parts if p]) + "."
 
 
+# =========================================================
+# RELEVANCE CHECKING - DYNAMIC DETECTION
+# =========================================================
+
+# Minimum relevance score threshold (0.0 to 1.0)
+# Documents below this threshold are considered irrelevant
+MIN_RELEVANCE_SCORE = 0.65
+
+
+def check_query_relevance(
+    query_text: str,
+    candidates: List[Dict[str, Any]],
+    score_threshold: float = MIN_RELEVANCE_SCORE
+) -> Dict[str, Any]:
+    """
+    Check if retrieved candidates are semantically relevant to the query.
+    
+    This prevents the system from forcing irrelevant citations when the
+    database doesn't contain relevant data for the query topic.
+    
+    DYNAMIC DETECTION: Instead of hardcoding available domains, we extract
+    topics/titles from the actual retrieved documents to show what was found.
+    
+    Args:
+        query_text: The user's query or document content
+        candidates: Retrieved candidate documents
+        score_threshold: Minimum relevance score (0.0-1.0)
+    
+    Returns:
+        Dict with:
+            - is_relevant: bool
+            - avg_score: float
+            - max_score: float
+            - relevant_count: int
+            - detected_topics: Topics found in retrieved documents
+            - recommendation: str (explanation for user)
+    """
+    if not candidates:
+        return {
+            "is_relevant": False,
+            "avg_score": 0.0,
+            "max_score": 0.0,
+            "relevant_count": 0,
+            "total_candidates": 0,
+            "detected_topics": [],
+            "detected_titles": [],
+            "detected_meta_analyses": [],
+            "recommendation": "No documents were retrieved from the database."
+        }
+    
+    # Extract scores from candidates
+    scores = []
+    for c in candidates:
+        # Try different score fields
+        score = (
+            c.get("rerank_score") or 
+            c.get("score") or 
+            c.get("distance") or 
+            0.0
+        )
+        # Normalize if needed (some scores are 0-1, some might be higher)
+        if isinstance(score, (int, float)):
+            scores.append(float(score))
+    
+    if not scores:
+        scores = [0.0]
+    
+    avg_score = sum(scores) / len(scores)
+    max_score = max(scores)
+    
+    # Count how many candidates meet the threshold
+    relevant_count = sum(1 for s in scores if s >= score_threshold)
+    
+    # DYNAMIC: Extract topics/titles from the actual retrieved documents
+    detected_topics = set()
+    detected_titles = set()
+    detected_meta_analyses = set()
+    
+    for c in candidates:
+        md = c.get("metadata", {}) if isinstance(c.get("metadata"), dict) else c
+        
+        # Extract topic field
+        topic = md.get("topic", "") or ""
+        if topic and len(topic) > 10:
+            detected_topics.add(topic[:80])
+        
+        # Extract study title
+        study_title = md.get("study_title", "") or md.get("Study Title", "") or ""
+        if study_title and len(study_title) > 10:
+            detected_titles.add(study_title[:100])
+        
+        # Extract meta-analysis title (describes the category)
+        meta_title = md.get("meta_analysis_title", "") or ""
+        if meta_title and len(meta_title) > 10:
+            detected_meta_analyses.add(meta_title[:100])
+    
+    # Determine if results are relevant
+    # Criteria: At least 30% of results should meet threshold, OR max score > 0.75
+    is_relevant = (relevant_count >= len(candidates) * 0.3) or (max_score >= 0.75)
+    
+    # Build recommendation message
+    if is_relevant:
+        recommendation = f"Found {relevant_count} relevant documents (avg relevance: {avg_score:.2f})"
+    else:
+        # Show what WAS found (dynamically detected)
+        found_topics = list(detected_meta_analyses)[:3] or list(detected_topics)[:3]
+        if found_topics:
+            topics_str = "; ".join(found_topics)
+            recommendation = (
+                f"The retrieved documents have low relevance to your query "
+                f"(avg score: {avg_score:.2f}). "
+                f"The search found documents about: {topics_str}. "
+                f"Consider refining your query or enabling web search."
+            )
+        else:
+            recommendation = (
+                f"The retrieved documents have low relevance to your query "
+                f"(avg score: {avg_score:.2f}, max: {max_score:.2f}). "
+                f"Consider refining your query or enabling web search."
+            )
+    
+    return {
+        "is_relevant": is_relevant,
+        "avg_score": avg_score,
+        "max_score": max_score,
+        "relevant_count": relevant_count,
+        "total_candidates": len(candidates),
+        "detected_topics": list(detected_topics)[:10],
+        "detected_titles": list(detected_titles)[:10],
+        "detected_meta_analyses": list(detected_meta_analyses)[:10],
+        "recommendation": recommendation
+    }
+
+
+def generate_no_relevant_data_response(
+    query_text: str,
+    relevance_check: Dict[str, Any]
+) -> Dict[str, Any]:
+    """
+    Generate a helpful response when no relevant data is found.
+    
+    Instead of forcing irrelevant citations, this tells the user:
+    1. That no relevant research was found for their topic
+    2. What topics WERE found in the search results (dynamically detected)
+    3. Suggestions for how to proceed
+    
+    Args:
+        query_text: Original query
+        relevance_check: Output from check_query_relevance()
+    
+    Returns:
+        Dict with response and metadata
+    """
+    detected_topics = relevance_check.get("detected_topics", [])
+    detected_titles = relevance_check.get("detected_titles", [])
+    detected_meta_analyses = relevance_check.get("detected_meta_analyses", [])
+    avg_score = relevance_check.get("avg_score", 0)
+    max_score = relevance_check.get("max_score", 0)
+    total_candidates = relevance_check.get("total_candidates", 0)
+    
+    # Build the response
+    response = f"""## Research Relevance Notice
+
+**The retrieved research does not appear to directly address your query.**
+
+Rather than provide potentially misleading citations, I'm letting you know what was found and offering alternatives.
+
+### Relevance Assessment
+
+| Metric | Value | Threshold |
+|--------|-------|-----------|
+| Documents Retrieved | {total_candidates} | - |
+| Average Relevance Score | {avg_score:.2f} | {MIN_RELEVANCE_SCORE} |
+| Maximum Relevance Score | {max_score:.2f} | 0.75 |
+| Status | **Below Threshold** | - |
+
+"""
+    
+    # Show what WAS found (dynamically detected from results)
+    if detected_meta_analyses:
+        response += """### What the Search Found
+
+The database search returned studies primarily in these research areas:
+
+"""
+        for meta in list(detected_meta_analyses)[:5]:
+            response += f"- {meta}\n"
+        response += "\n"
+    
+    if detected_titles:
+        response += """### Sample Studies Retrieved
+
+"""
+        for title in list(detected_titles)[:3]:
+            response += f"- *{title}*\n"
+        response += "\n"
+    
+    if detected_topics:
+        response += """### Topics in Retrieved Documents
+
+"""
+        for topic in list(detected_topics)[:5]:
+            response += f"- {topic}\n"
+        response += "\n"
+    
+    response += """### Why This Matters
+
+The retrieved studies focus on different topics than your query. Citing them would be misleading because:
+- The research context wouldn't support claims about your actual topic
+- Readers might incorrectly assume the citations are relevant
+- Analysis quality depends on using appropriate sources
+
+### How to Proceed
+
+**Option 1: Enable Web Search**
+I can search the internet for relevant research on your topic. This may find studies that aren't in our curated database.
+
+**Option 2: General Analysis**
+I can analyze your document using my general knowledge without citing specific research from this database.
+
+**Option 3: Refine Your Query**
+If your document relates to the topics found above, try rephrasing your query to emphasize those connections.
+
+**Option 4: Contact Administrator**
+Request that relevant research for your topic area be added to the database.
+
+---
+
+Would you like me to proceed with one of these options?
+"""
+    
+    return {
+        "response": response,
+        "citations": [],
+        "has_research": False,
+        "num_sources": 0,
+        "raw_chunks": [],
+        "source": "none",
+        "relevance_check": relevance_check,
+        "data_available": False
+    }
+
+
 def build_numbered_ref_context(
     candidates: List[Dict[str, Any]],
     max_content_chars: int = 2000
@@ -1604,7 +1847,9 @@ async def generate_from_precomputed_candidates(
     system_prompt: str,
     user_query: str,
     candidates: List[Dict[str, Any]],
-    max_tokens: int = 6000
+    max_tokens: int = 6000,
+    enforce_relevance: bool = True,
+    relevance_threshold: float = MIN_RELEVANCE_SCORE
 ) -> Dict[str, Any]:
     """
     Generate the final response given precomputed candidate matches using REF ID format.
@@ -1614,11 +1859,17 @@ async def generate_from_precomputed_candidates(
     - LLM is instructed to use inline citations like [1], [2]
     - References section lists all sources
     
+    IMPORTANT: This function now includes a relevance check to prevent
+    forcing irrelevant citations when the database doesn't contain
+    relevant data for the query topic.
+    
     Args:
         system_prompt: Base system prompt
         user_query: User's query
         candidates: Precomputed candidate matches from hybrid search
         max_tokens: Maximum tokens for response
+        enforce_relevance: If True, check relevance and refuse low-quality results
+        relevance_threshold: Minimum score for relevance (default from MIN_RELEVANCE_SCORE)
     
     Returns:
         Dict with response, citations, and metadata
@@ -1648,6 +1899,29 @@ async def generate_from_precomputed_candidates(
             'raw_chunks': [],
             'source': 'research'
         }
+    
+    # =========================================================
+    # RELEVANCE CHECK - Prevent forcing irrelevant citations
+    # =========================================================
+    if enforce_relevance:
+        relevance_check = check_query_relevance(
+            query_text=user_query,
+            candidates=unique_candidates,
+            score_threshold=relevance_threshold
+        )
+        
+        logger.info(f"Relevance check: is_relevant={relevance_check['is_relevant']}, "
+                   f"avg_score={relevance_check['avg_score']:.3f}, "
+                   f"max_score={relevance_check['max_score']:.3f}, "
+                   f"relevant_count={relevance_check['relevant_count']}/{relevance_check['total_candidates']}")
+        
+        if not relevance_check["is_relevant"]:
+            logger.warning(f"LOW RELEVANCE DETECTED - Retrieved documents do not match query topic")
+            logger.warning(f"Detected domains in results: {relevance_check.get('detected_domains', [])}")
+            logger.warning(f"Available domains: {relevance_check.get('available_domains', [])}")
+            
+            # Return a helpful response instead of forcing irrelevant citations
+            return generate_no_relevant_data_response(user_query, relevance_check)
 
     # Build numbered context with REF ID format
     numbered_context, citations_data = build_numbered_ref_context(unique_candidates)

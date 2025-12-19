@@ -120,7 +120,7 @@ async def search_research_chunks_from_text(
                 # send the whole text as the user content (may be long)
                 def _call():
                     return client.messages.create(
-                        model="claude-sonnet-4-20250514",
+                        model="claude-3-5-sonnet-20241022",
                         max_tokens=8000,
                         temperature=0,
                         messages=[{"role": "user", "content": prompt + "\n\n" + text}]

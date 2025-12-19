@@ -258,7 +258,7 @@ Document to chunk:
 
             def _call_llm():
                 return anthropic_client.messages.create(
-                    model="claude-sonnet-4-20250514",
+                    model="claude-3-5-sonnet-20241022",
                     max_tokens=8000,
                     temperature=0,
                     messages=[{"role": "user", "content": prompt}]
@@ -538,7 +538,7 @@ async def rerank_results(
     query: str,
     candidates: List[Dict[str, Any]],
     top_n: int = 10,
-    model: str = "claude-sonnet-4-20250514"
+    model: str = "claude-3-5-sonnet-20241022"
 ) -> List[Dict[str, Any]]:
     """
     Rerank candidates using Anthropic LLM to score relevance.
@@ -774,7 +774,7 @@ async def generate_analysis(
     context: str,
     system_prompt: Optional[str] = None,
     max_tokens: int = 4000,
-    model: str = "claude-sonnet-4-20250514"
+    model: str = "claude-3-5-sonnet-20241022"
 ) -> Dict[str, Any]:
     """
     Generate final analysis using LLM with research context.
